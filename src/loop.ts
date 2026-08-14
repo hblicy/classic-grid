@@ -23,6 +23,13 @@ import {
   type BuiltGrid,
 } from "./grid.js";
 import { loadVenueSessionCounters } from "./ledger.js";
+import {
+  OrderOwnershipStore,
+  emptyOrderOwnershipState,
+  persistPlacedOrders,
+  type GridFingerprint,
+  type OrderOwnershipState,
+} from "./orderOwnership.js";
 import { getOfficialCache, refreshOfficialStats } from "./officialStats.js";
 import { createExecutor, type VenueExecutor } from "./venues/index.js";
 import type { GridParams, Side, VenueId } from "./types.js";
@@ -43,34 +50,42 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** 软启：从 data/status.json 恢复锚点，避免重锚导致误撤现有挂单 */
-function loadSoftResumeAnchors(): Partial<
+function loadSoftResumeAnchors(ownershipState: OrderOwnershipState): Partial<
   Record<VenueId, { anchorMid: number; gridCount: number }>
 > {
   loadEnv();
-  if (!["1", "true", "yes", "YES"].includes(String(process.env.SOFT_RESUME || "").trim())) {
-    return {};
+  const out: Partial<Record<VenueId, { anchorMid: number; gridCount: number }>> = {};
+  for (const [venue, saved] of Object.entries(ownershipState.venues)) {
+    if (!saved) continue;
+    out[venue as VenueId] = {
+      anchorMid: saved.grid.anchorMid,
+      gridCount: saved.grid.gridCount,
+    };
   }
-  try {
-    const p = path.resolve(process.cwd(), "data", "status.json");
-    if (!fs.existsSync(p)) return {};
-    const j = JSON.parse(fs.readFileSync(p, "utf8"));
-    const out: Partial<Record<VenueId, { anchorMid: number; gridCount: number }>> = {};
-    for (const v of j.venues || []) {
-      const id = String(v.venue) as VenueId;
-      const mid = Number(v.anchorMid);
-      const gc = Number(v.gridCount);
-      if (mid > 0 && gc > 0) out[id] = { anchorMid: mid, gridCount: gc };
+
+  if (["1", "true", "yes", "YES"].includes(String(process.env.SOFT_RESUME || "").trim())) {
+    try {
+      const p = path.resolve(process.cwd(), "data", "status.json");
+      if (fs.existsSync(p)) {
+        const j = JSON.parse(fs.readFileSync(p, "utf8"));
+        for (const v of j.venues || []) {
+          const id = String(v.venue) as VenueId;
+          if (out[id]) continue;
+          const mid = Number(v.anchorMid);
+          const gc = Number(v.gridCount);
+          if (mid > 0 && gc > 0) out[id] = { anchorMid: mid, gridCount: gc };
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[soft-resume] status load failed: ${String(e?.message || e).slice(0, 120)}`);
     }
-    console.log(
-      `[soft-resume] loaded anchors: ${Object.entries(out)
-        .map(([k, v]) => `${k}=${v!.anchorMid.toFixed(1)}`)
-        .join(", ") || "(none)"}`
-    );
-    return out;
-  } catch (e: any) {
-    console.warn(`[soft-resume] load failed: ${String(e?.message || e).slice(0, 120)}`);
-    return {};
   }
+  console.log(
+    `[soft-resume] loaded anchors: ${Object.entries(out)
+      .map(([k, v]) => `${k}=${v!.anchorMid.toFixed(1)}`)
+      .join(", ") || "(none)"}`
+  );
+  return out;
 }
 
 let softResumeAnchors: Partial<
@@ -95,6 +110,8 @@ type VenueRuntime = {
   unrealizedPnl: number;
   /** 仅记录本进程从交易所下单回执中确认过的订单 ID */
   ownedOrderIds: Set<string>;
+  ownershipRestored: boolean;
+  ownershipPause?: string;
   recenterPhase: "idle" | "cancelling" | "paused";
   recenterConfirmTicks: number;
   recenterStartedAt: number;
@@ -199,6 +216,67 @@ async function ensureAnchored(
   return { mid: snap.mid, snap };
 }
 
+function currentFingerprint(rt: VenueRuntime): GridFingerprint {
+  if (!rt.params || !rt.built || !(rt.anchorMid > 0)) {
+    throw new Error(`[${rt.ex.id}] cannot build ownership fingerprint before anchoring`);
+  }
+  return {
+    anchorMid: rt.anchorMid,
+    gridCount: rt.params.gridCount,
+    spacing: rt.built.spacing,
+    sizeBase: rt.params.sizeBase,
+    mode: rt.params.mode,
+  };
+}
+
+function pauseForOwnership(rt: VenueRuntime, message: string): void {
+  const first = rt.ownershipPause !== message;
+  rt.ownershipPause = message;
+  rt.recenterPhase = "paused";
+  rt.recenterNotice = message;
+  rt.lastError = message;
+  if (first) {
+    console.error(`[${rt.ex.id}] ${message}`);
+    void tgError(rt.ex.id, message);
+  }
+}
+
+function reconcileOwnership(
+  rt: VenueRuntime,
+  market: string,
+  store: OrderOwnershipStore,
+  openOrders: Awaited<ReturnType<VenueExecutor["snapshot"]>>["openOrders"]
+): void {
+  if (rt.ownershipPause) return;
+  try {
+    const restored = store.prepareRuntime(
+      rt.ex.id,
+      market,
+      currentFingerprint(rt),
+      openOrders
+    );
+    rt.ownedOrderIds = restored.ownedOrderIds;
+    if (!rt.ownershipRestored) {
+      rt.active = restored.active;
+      console.log(
+        `[${rt.ex.id}] ownership loaded=${restored.counts.loaded} matched=${restored.counts.matched} ` +
+          `removed=${restored.counts.removed} unknown=${restored.counts.unknown}`
+      );
+    } else if (restored.counts.removed > 0 || restored.counts.unknown > 0) {
+      console.log(
+        `[${rt.ex.id}] ownership reconciled matched=${restored.counts.matched} ` +
+          `removed=${restored.counts.removed} unknown=${restored.counts.unknown}`
+      );
+    }
+    rt.ownershipRestored = true;
+    if (restored.pauseReason) pauseForOwnership(rt, restored.pauseReason);
+  } catch (error) {
+    rt.ownershipRestored = true;
+    const detail = error instanceof Error ? error.message : String(error);
+    pauseForOwnership(rt, `订单归属校验失败：${detail}；已暂停该交易所，禁止继续写单`);
+  }
+}
+
 type RecenterResult =
   | { suspended: false }
   | { suspended: true; message: string };
@@ -207,17 +285,18 @@ async function manageRecenter(
   rt: VenueRuntime,
   market: string,
   cfg: RuntimeConfig,
-  snap: Awaited<ReturnType<VenueExecutor["snapshot"]>>
+  snap: Awaited<ReturnType<VenueExecutor["snapshot"]>>,
+  ownershipStore: OrderOwnershipStore | null
 ): Promise<RecenterResult> {
-  if (!cfg.recenter.enabled || !rt.params || !rt.built) {
-    return { suspended: false };
-  }
-
   if (rt.recenterPhase === "paused") {
     return {
       suspended: true,
       message: rt.recenterNotice || "重心化已暂停，需要人工检查并重启",
     };
+  }
+
+  if (!cfg.recenter.enabled || !rt.params || !rt.built) {
+    return { suspended: false };
   }
 
   const unowned = snap.openOrders.filter((o) => !rt.ownedOrderIds.has(o.id));
@@ -325,6 +404,21 @@ async function manageRecenter(
   rt.seeded = false;
   delete softResumeAnchors[rt.ex.id];
   anchorRuntime(rt, cfg, snap.mid, false);
+  if (ownershipStore) {
+    try {
+      ownershipStore.replaceVenue(rt.ex.id, {
+        market,
+        grid: currentFingerprint(rt),
+        orders: [],
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = `重心化新网格归属写入失败：${detail}；已暂停该交易所，禁止重新挂单`;
+      pauseForOwnership(rt, message);
+      return { suspended: true, message };
+    }
+  }
   rt.recenterPhase = "idle";
   rt.recenterConfirmTicks = 0;
   rt.lastRecenterAt = Date.now();
@@ -336,11 +430,10 @@ async function manageRecenter(
 async function tickOne(
   rt: VenueRuntime,
   market: string,
-  cfg: RuntimeConfig
+  cfg: RuntimeConfig,
+  ownershipStore: OrderOwnershipStore | null
 ): Promise<void> {
   const { mid, snap } = await ensureAnchored(rt, market, cfg);
-  const g = rt.params!;
-  const built = rt.built!;
   const posBefore = rt.lastPosition ?? snap.position;
   // 仅维护仓位变化跟踪（开平仓 TG）；浮盈亏看板一律用所方官方字段
   syncInventory(rt, snap.position, snap.mid);
@@ -349,10 +442,14 @@ async function tickOne(
       ? Number(snap.unrealizedPnl)
       : null;
   rt.unrealizedPnl = upnlOfficial ?? 0;
-  for (const id of [...rt.ownedOrderIds]) {
-    if (!snap.openOrders.some((o) => o.id === id)) rt.ownedOrderIds.delete(id);
+  if (ownershipStore) {
+    reconcileOwnership(rt, market, ownershipStore, snap.openOrders);
+  } else {
+    for (const id of [...rt.ownedOrderIds]) {
+      if (!snap.openOrders.some((o) => o.id === id)) rt.ownedOrderIds.delete(id);
+    }
   }
-  const recenter = await manageRecenter(rt, market, cfg, snap);
+  const recenter = await manageRecenter(rt, market, cfg, snap, ownershipStore);
   const currentGrid = rt.built!;
   const currentParams = rt.params!;
   const plan = recenter.suspended
@@ -432,6 +529,27 @@ async function tickOne(
       applyErr = result.errors.slice(0, 2).join("; ") || `failed=${result.failed}`;
       void tgError(rt.ex.id, applyErr);
     }
+    if (ownershipStore && result.placedOrders.length > 0) {
+      const persisted = persistPlacedOrders({
+        store: ownershipStore,
+        venue: rt.ex.id,
+        market,
+        grid: currentFingerprint(rt),
+        orders: result.placedOrders.map(({ id, order }) => ({
+          id,
+          side: order.side,
+          price: order.price,
+          size: order.size,
+          level: order.level,
+        })),
+      });
+      if (!persisted.ok) {
+        pauseForOwnership(rt, persisted.pauseReason);
+        applyErr = applyErr
+          ? `${applyErr}; ${persisted.pauseReason}`
+          : persisted.pauseReason;
+      }
+    }
   }
 
   rt.active = nextActive;
@@ -476,7 +594,11 @@ async function tickOne(
 export async function runLoop(opts?: { once?: boolean }): Promise<void> {
   const cfg = loadRuntimeConfig();
   assertLiveAllowed(cfg);
-  softResumeAnchors = loadSoftResumeAnchors();
+  const ownershipStore = cfg.dryRun ? null : new OrderOwnershipStore();
+  const ownershipState = ownershipStore
+    ? ownershipStore.load()
+    : emptyOrderOwnershipState();
+  softResumeAnchors = loadSoftResumeAnchors(ownershipState);
 
   console.log(
     `classic-grid start dryRun=${cfg.dryRun} venues=${cfg.venues.join(",")} markets=${cfg.markets.join(",")} tickMs=${cfg.tickMs}`
@@ -588,6 +710,7 @@ export async function runLoop(opts?: { once?: boolean }): Promise<void> {
       invCost: 0,
       unrealizedPnl: 0,
       ownedOrderIds: new Set(),
+      ownershipRestored: false,
       recenterPhase: "idle",
       recenterConfirmTicks: 0,
       recenterStartedAt: 0,
@@ -662,7 +785,7 @@ export async function runLoop(opts?: { once?: boolean }): Promise<void> {
             console.log(`[${rt.ex.id}] reconnected`);
             rt.lastError = undefined;
           }
-          await tickOne(rt, market, cfg);
+          await tickOne(rt, market, cfg, ownershipStore);
         } catch (e: any) {
           const msg = String(e?.message || e).slice(0, 200);
           console.error(`[${rt.ex.id}] tick failed: ${msg}`);
