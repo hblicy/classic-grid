@@ -16,7 +16,7 @@
     "flat": "node --import tsx src/cli/flat.ts",
     "dashboard": "node --import tsx src/cli/dashboard.ts",
     "adopt-orders": "node --import tsx src/cli/adopt-orders.ts",
-    "test": "node --import tsx test/grid.test.ts && node --import tsx test/security.test.ts && node --import tsx test/orderOwnership.test.ts && node --import tsx test/adoptOrders.test.ts"
+    "test": "node --import tsx test/grid.test.ts && node --import tsx test/security.test.ts && node --import tsx test/ledger.test.ts && node --import tsx test/orderOwnership.test.ts && node --import tsx test/adoptOrders.test.ts"
   },
   "engines": {
     "node": ">=20"

@@ -183,6 +183,12 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
   const state = loadLedger();
   if (state.dayOpenEquity === undefined) state.dayOpenEquity = null;
   const today = ensureToday(state);
+  const venueKeysBeforeIngest = [
+    ...new Set([
+      ...Object.keys(state.last || {}),
+      ...(((state as any)._rolloverVenueKeys as string[]) || []),
+    ]),
+  ];
 
   let totalProfit = 0;
   let totalEquity = 0;
@@ -263,31 +269,26 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
   if (equityCount > 0) {
     today.equity = round(totalEquity);
 
-    const knownVenueIds = [
-      "extended",
-      "risex",
-      "decibel",
-      "n1",
-      "phoenix",
-      ...venues.map((v) => v.venue),
-      ...(((state as any)._rolloverVenueKeys as string[]) || []),
-    ];
-
-    // 旧账本无 venuesInOpenEquity：先按 last 里「非本次新入金所」占位
+    // 旧账本无 venuesInOpenEquity：只能用本轮入账前已经存在的所恢复名单。
+    // 不能用本轮更新后的 state.last，否则新加入的所会被误判为日切时已存在。
     if (!Array.isArray(state.venuesInOpenEquity)) {
-      const known = Object.keys(state.last || {});
-      state.venuesInOpenEquity = known.filter((k) => k !== "phoenix");
+      state.venuesInOpenEquity = venueKeysBeforeIngest;
     }
 
-    // 空名单 + 已有开盘基准：只是日切/重启后晚连上，补名单，禁止再叠权益
+    // 缺少历史所名单时无法拆分已有总权益，只能把当前所视为已在基准中。
     if (
       state.dayOpenEquity != null &&
-      Array.isArray(state.venuesInOpenEquity) &&
-      state.venuesInOpenEquity.length === 0
+      state.venuesInOpenEquity.length === 0 &&
+      venueKeysBeforeIngest.length === 0
     ) {
-      state.venuesInOpenEquity = [...new Set(knownVenueIds)];
+      state.venuesInOpenEquity = venues
+        .filter((v) => {
+          const eq = Number(v.equityUsd);
+          return Number.isFinite(eq) && eq > 0;
+        })
+        .map((v) => v.venue);
       console.log(
-        `[ledger] 开盘名单为空，已按已知所补齐（不叠权益） dayOpen=${Number(state.dayOpenEquity).toFixed(2)}`
+        `[ledger] 开盘名单缺失，已按当前所补齐（不叠权益） dayOpen=${Number(state.dayOpenEquity).toFixed(2)}`
       );
     }
 
@@ -295,8 +296,7 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
       // 优先用昨日收盘权益作今日开盘；没有则冻结当前权益（当日差从 0 起）
       if (yesterday && Number(yesterday.equity) > 0) {
         state.dayOpenEquity = Number(yesterday.equity);
-        // 昨收已是全账户口径：今日各所均视为已在基准内，禁止晚连上再叠加
-        state.venuesInOpenEquity = [...new Set(knownVenueIds)];
+        state.venuesInOpenEquity = venueKeysBeforeIngest;
       } else {
         state.dayOpenEquity = today.equity;
         state.venuesInOpenEquity = venues
@@ -306,20 +306,20 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
           })
           .map((v) => v.venue);
       }
-      delete (state as any)._rolloverVenueKeys;
-    } else {
-      for (const v of venues) {
-        const eq = Number(v.equityUsd);
-        if (!(Number.isFinite(eq) && eq > 0)) continue;
-        if (state.venuesInOpenEquity!.includes(v.venue)) continue;
-        // 新所当日入账（含入金）：并入开盘基准，不进今日盈亏
-        state.dayOpenEquity = round(Number(state.dayOpenEquity) + eq);
-        state.venuesInOpenEquity!.push(v.venue);
-        console.log(
-          `[ledger] 新所 ${v.venue} 权益 ${eq.toFixed(2)}U 并入开盘基准（不计今日盈亏）`
-        );
-      }
     }
+
+    for (const v of venues) {
+      const eq = Number(v.equityUsd);
+      if (!(Number.isFinite(eq) && eq > 0)) continue;
+      if (state.venuesInOpenEquity.includes(v.venue)) continue;
+      // 新所当日入账（含入金）：并入开盘基准，不进今日盈亏
+      state.dayOpenEquity = round(Number(state.dayOpenEquity) + eq);
+      state.venuesInOpenEquity.push(v.venue);
+      console.log(
+        `[ledger] 新所 ${v.venue} 权益 ${eq.toFixed(2)}U 并入开盘基准（不计今日盈亏）`
+      );
+    }
+    delete (state as any)._rolloverVenueKeys;
 
     today.dayProfit = round(today.equity - state.dayOpenEquity);
     if (yesterday && Number(yesterday.equity) > 0) {
