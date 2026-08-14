@@ -47,6 +47,20 @@ type TrackedOrder = {
   size: number;
 };
 
+export type OwnershipPreparation = {
+  ownedOrderIds: Set<string>;
+  active: Map<string, TrackedOrder>;
+  unknownOrderIds: string[];
+  removedOrderIds: string[];
+  counts: {
+    loaded: number;
+    matched: number;
+    removed: number;
+    unknown: number;
+  };
+  pauseReason?: string;
+};
+
 export function emptyOrderOwnershipState(): OrderOwnershipState {
   return { version: 1, venues: {} };
 }
@@ -329,5 +343,52 @@ export class OrderOwnershipStore {
       this.save(state);
     }
     return { ownedOrderIds, active, unknownOrderIds, removedOrderIds };
+  }
+
+  prepareRuntime(
+    venue: VenueId,
+    market: string,
+    grid: GridFingerprint,
+    liveOrders: LiveOrder[]
+  ): OwnershipPreparation {
+    const loaded = this.load().venues[venue]?.orders.length ?? 0;
+    this.assertGrid(venue, market, grid);
+    const reconciled = this.reconcile(venue, market, liveOrders);
+    const unknown = reconciled.unknownOrderIds.length;
+    return {
+      ...reconciled,
+      counts: {
+        loaded,
+        matched: reconciled.ownedOrderIds.size,
+        removed: reconciled.removedOrderIds.length,
+        unknown,
+      },
+      pauseReason:
+        unknown > 0
+          ? `重心化保护暂停：发现 ${unknown} 个无法确认归属的挂单，不会新增或撤销订单；请先核对并执行 adopt-orders 接管`
+          : undefined,
+    };
+  }
+}
+
+export function persistPlacedOrders(p: {
+  store: Pick<OrderOwnershipStore, "recordPlaced">;
+  venue: VenueId;
+  market: string;
+  grid: GridFingerprint;
+  orders: OwnedOrderRecord[];
+}): { ok: true } | { ok: false; pauseReason: string } {
+  try {
+    p.store.recordPlaced(p.venue, p.market, p.grid, p.orders);
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const ids = p.orders.map((order) => order.id).join(",") || "(none)";
+    return {
+      ok: false,
+      pauseReason:
+        `订单归属持久化失败：交易所已确认订单 ID ${ids}，但本地写入失败：${message}；` +
+        "已暂停该交易所，禁止继续写单",
+    };
   }
 }
