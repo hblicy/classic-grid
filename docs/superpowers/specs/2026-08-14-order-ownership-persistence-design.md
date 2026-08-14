@@ -136,4 +136,3 @@ npm run adopt-orders -- --venues=risex,decibel --market=BTC --confirm-all-bot-or
 4. 使用确认参数写入 `data/order-ownership.json`。
 5. 正常启动机器人，确认日志中的实时匹配数等于交易所当前挂单数且未知数为零。
 6. 后续正常重启只停止和启动程序，不再撤销现有挂单。
-
