@@ -574,6 +574,7 @@ async function tickOne(
     gridProfit: Number(rt.gridProfit.toFixed(4)),
     unrealizedPnl:
       upnlOfficial != null ? Number(upnlOfficial.toFixed(4)) : undefined,
+    liquidationPrice: snap.liquidationPrice,
     equityUsd:
       snap.equityUsd != null && Number.isFinite(snap.equityUsd)
         ? Number(snap.equityUsd.toFixed(4))

@@ -69,6 +69,7 @@ async function main(): Promise<void> {
             seeded: false,
             completedRungs: 0,
             gridProfit: 0,
+            liquidationPrice: snap.liquidationPrice,
             updatedAt: new Date().toISOString(),
           });
         } catch (e: any) {
