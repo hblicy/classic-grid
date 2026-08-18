@@ -8,6 +8,7 @@ import {
   loadLedger,
 } from "./ledger.js";
 import type { OfficialBundle } from "./officialStats.js";
+import type { ExternalCashFlow } from "./types.js";
 
 export type DashboardVenueRow = {
   venue: string;
@@ -28,6 +29,7 @@ export type DashboardVenueRow = {
   /** 官方爆仓价 */
   liquidationPrice?: number;
   equityUsd?: number;
+  cashFlows?: ExternalCashFlow[];
   orders?: Array<{ side: string; price: number }>;
   /** 官方今日量/费/平仓盈亏；无则 null，前端回退本地 */
   officialVolume?: number | null;
@@ -98,15 +100,11 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
   const next = snapshot.venues.filter((v) => v.venue !== row.venue);
   next.push(row);
   next.sort((a, b) => a.venue.localeCompare(b.venue));
-  let ledger;
-  try {
-    ledger = ledgerPublicView(ingestVenuesForLedger(next));
-  } catch {
-    ledger = ledgerPublicView(loadLedger());
-  }
+  const ledger = ledgerPublicView(ingestVenuesForLedger(next));
+  const publicVenues = next.map(({ cashFlows: _cashFlows, ...venue }) => venue);
   snapshot = {
     ...snapshot,
-    venues: next,
+    venues: publicVenues,
     updatedAt: new Date().toISOString(),
     ledger,
   };

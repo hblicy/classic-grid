@@ -579,6 +579,7 @@ async function tickOne(
       snap.equityUsd != null && Number.isFinite(snap.equityUsd)
         ? Number(snap.equityUsd.toFixed(4))
         : undefined,
+    cashFlows: snap.cashFlows,
     orders: snap.openOrders.slice(0, 120).map((o) => ({
       side: o.side,
       price: Number(o.price),

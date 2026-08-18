@@ -906,6 +906,10 @@ export class RiseExchange extends EventEmitter {
     }
   }
 
+  async getTransferHistory(limit = 1000) {
+    return this.info.getTransferHistory(this.account, limit);
+  }
+
   async _fetchAllAccountTrades() {
     const batch = 1000;
     const all = [];
