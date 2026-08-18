@@ -907,7 +907,20 @@ export class RiseExchange extends EventEmitter {
   }
 
   async getTransferHistory(limit = 1000) {
-    return this.info.getTransferHistory(this.account, limit);
+    const data = await this.info.http.get(
+      `/v1/account/transfer-history?account=${encodeURIComponent(this.account)}&limit=${limit}`
+    );
+    const rows = data?.items ?? data?.transfers;
+    if (!Array.isArray(rows)) {
+      const keys =
+        data && typeof data === 'object'
+          ? Object.keys(data).join(',')
+          : typeof data;
+      throw new Error(
+        `RISEx transfer-history 响应结构无效 keys=${keys || '(none)'}`
+      );
+    }
+    return rows;
   }
 
   async _fetchAllAccountTrades() {

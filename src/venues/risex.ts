@@ -33,7 +33,8 @@ type RiseExchange = {
     Array<{
       amount: string;
       type: string;
-      timestamp: string;
+      timestamp?: string;
+      block_time?: string;
       transaction_hash?: string;
       id?: string;
       tx_hash?: string;
@@ -71,7 +72,8 @@ function parseTransferTimestampMs(raw: unknown): number {
 function parseTransfer(row: {
   amount: string;
   type: string;
-  timestamp: string;
+  timestamp?: string;
+  block_time?: string;
   transaction_hash?: string;
   id?: string;
   tx_hash?: string;
@@ -93,10 +95,12 @@ function parseTransfer(row: {
   } else {
     throw new Error(`未知 RISEx 资金流水类型: ${type || "(empty)"}`);
   }
-  const timestampMs = parseTransferTimestampMs(row.timestamp);
+  const rawTimestamp = row.timestamp ?? row.block_time;
+  const timestampMs = parseTransferTimestampMs(rawTimestamp);
   const amountUsd = Math.abs(rawAmount) * sign;
-  const id = String(row.transaction_hash || row.tx_hash || row.id || "").trim() ||
-    `${type}:${row.timestamp}:${Math.abs(rawAmount)}`;
+  const id =
+    String(row.transaction_hash || row.tx_hash || row.id || "").trim() ||
+    `${type}:${String(rawTimestamp)}:${Math.abs(rawAmount)}`;
   return { id, amountUsd, timestampMs };
 }
 
