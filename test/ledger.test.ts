@@ -185,18 +185,24 @@ try {
     "utf8"
   );
 
+  const oldDeposit = {
+    id: "0xold-deposit",
+    amountUsd: 800,
+    timestampMs: Date.parse(`${yesterday}T12:00:00+08:00`),
+  };
   const deposit = {
     id: "0xdeposit:1",
     amountUsd: 800,
     timestampMs: Date.now(),
   };
   const afterDeposit = ingestVenuesForLedger([
-    venue("risex", 1605, [deposit]),
+    venue("risex", 1605, [oldDeposit, deposit]),
   ]);
   assert.equal(afterDeposit.dayOpenEquity, 1600);
   assert.equal(afterDeposit.calendar[0]?.dayProfit, 5);
   assert.equal(afterDeposit.calendar[0]?.externalCashFlow, 800);
   assert.deepEqual(afterDeposit.processedCashFlowIds, ["risex:0xdeposit:1"]);
+  assert.ok(!afterDeposit.processedCashFlowIds?.includes("risex:0xold-deposit"));
 
   const afterDuplicateRefresh = ingestVenuesForLedger([
     venue("risex", 1606, [deposit]),
