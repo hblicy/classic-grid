@@ -30,4 +30,21 @@ assert.equal(
   "&lt;img src=x onerror=&quot;globalThis.pwned=1&quot;&gt;"
 );
 
+const loopSource = fs.readFileSync(path.resolve("src/loop.ts"), "utf8");
+assert.match(
+  loopSource,
+  /liquidationPrice:\s*snap\.liquidationPrice/,
+  "主循环必须把交易所快照中的爆仓价传给看板"
+);
+
+const dashboardCliSource = fs.readFileSync(
+  path.resolve("src/cli/dashboard.ts"),
+  "utf8"
+);
+assert.match(
+  dashboardCliSource,
+  /liquidationPrice:\s*snap\.liquidationPrice/,
+  "独立看板必须把交易所快照中的爆仓价传给看板"
+);
+
 console.log("security.test.ts OK");
