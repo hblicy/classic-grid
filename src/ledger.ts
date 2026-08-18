@@ -21,6 +21,8 @@ export type LedgerDay = {
   officialFees?: number;
   equity: number;
   equityChange: number;
+  /** 当日已确认的外部净资金流：充值为正、提现为负 */
+  externalCashFlow?: number;
   updatedAt: string;
 };
 
@@ -35,6 +37,8 @@ export type LedgerState = {
    * 避免「今日盈亏」被新入金抬高。
    */
   venuesInOpenEquity?: string[];
+  /** 当日已处理的外部资金流水，带 venue 前缀，重启后继续去重 */
+  processedCashFlowIds?: string[];
   calendar: LedgerDay[];
   /** venue -> last seen counters */
   last: Record<
@@ -96,6 +100,7 @@ function emptyState(): LedgerState {
     dayKey,
     dayOpenProfit: null,
     dayOpenEquity: null,
+    processedCashFlowIds: [],
     calendar: [
       {
         day: dayKey,
@@ -104,6 +109,7 @@ function emptyState(): LedgerState {
         todayVolume: 0,
         equity: 0,
         equityChange: 0,
+        externalCashFlow: 0,
         updatedAt: new Date().toISOString(),
       },
     ],
@@ -148,6 +154,7 @@ function ensureToday(state: LedgerState): LedgerDay {
     state.dayOpenEquity = null;
     // null=未初始化；勿用 []，否则会走「新所并入」把全所权益再加一遍
     state.venuesInOpenEquity = undefined;
+    state.processedCashFlowIds = [];
     (state as any)._rolloverVenueKeys = prevVenueKeys;
     const prev = state.calendar[0];
     state.calendar.unshift({
@@ -157,6 +164,7 @@ function ensureToday(state: LedgerState): LedgerDay {
       todayVolume: 0,
       equity: prev?.equity ?? 0,
       equityChange: 0,
+      externalCashFlow: 0,
       updatedAt: new Date().toISOString(),
     });
     // 保留最近 60 天
@@ -171,6 +179,7 @@ function ensureToday(state: LedgerState): LedgerDay {
       todayVolume: 0,
       equity: 0,
       equityChange: 0,
+      externalCashFlow: 0,
       updatedAt: new Date().toISOString(),
     };
     state.calendar.unshift(today);
@@ -268,6 +277,10 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
   const yesterday = state.calendar.find((d) => d.day !== today.day);
   if (equityCount > 0) {
     today.equity = round(totalEquity);
+    const processedCashFlowIds = new Set(state.processedCashFlowIds || []);
+    const newlyBaselinedVenues = new Set<string>();
+    const cashFlowTrackingWasMissing = !Array.isArray(state.processedCashFlowIds);
+    let baselineInitializedFromCurrent = false;
 
     // 旧账本无 venuesInOpenEquity：只能用本轮入账前已经存在的所恢复名单。
     // 不能用本轮更新后的 state.last，否则新加入的所会被误判为日切时已存在。
@@ -299,6 +312,7 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
         state.venuesInOpenEquity = venueKeysBeforeIngest;
       } else {
         state.dayOpenEquity = today.equity;
+        baselineInitializedFromCurrent = true;
         state.venuesInOpenEquity = venues
           .filter((v) => {
             const e = Number(v.equityUsd);
@@ -315,10 +329,49 @@ export function ingestVenuesForLedger(venues: DashboardVenueRow[]): LedgerState 
       // 新所当日入账（含入金）：并入开盘基准，不进今日盈亏
       state.dayOpenEquity = round(Number(state.dayOpenEquity) + eq);
       state.venuesInOpenEquity.push(v.venue);
+      newlyBaselinedVenues.add(v.venue);
       console.log(
         `[ledger] 新所 ${v.venue} 权益 ${eq.toFixed(2)}U 并入开盘基准（不计今日盈亏）`
       );
     }
+
+    for (const v of venues) {
+      for (const flow of v.cashFlows || []) {
+        const id = String(flow.id || "").trim();
+        const amount = Number(flow.amountUsd);
+        const timestampMs = Number(flow.timestampMs);
+        if (!id) throw new Error(`[ledger] ${v.venue} 资金流水缺少 id`);
+        if (!(Number.isFinite(amount) && amount !== 0)) {
+          throw new Error(`[ledger] ${v.venue} 资金流水 ${id} amountUsd 无效`);
+        }
+        if (!(Number.isFinite(timestampMs) && timestampMs > 0)) {
+          throw new Error(`[ledger] ${v.venue} 资金流水 ${id} timestampMs 无效`);
+        }
+        if (shanghaiDayKey(new Date(timestampMs)) !== today.day) continue;
+        const scopedId = `${v.venue}:${id}`;
+        if (processedCashFlowIds.has(scopedId)) continue;
+
+        const alreadyInsideCurrentBaseline =
+          baselineInitializedFromCurrent ||
+          newlyBaselinedVenues.has(v.venue) ||
+          (cashFlowTrackingWasMissing && !yesterday);
+        processedCashFlowIds.add(scopedId);
+        if (alreadyInsideCurrentBaseline) {
+          console.log(
+            `[ledger] ${v.venue} 资金流水 ${id} 已包含在当前基准，登记但不重复调整`
+          );
+          continue;
+        }
+
+        state.dayOpenEquity = round(Number(state.dayOpenEquity) + amount);
+        today.externalCashFlow = round((Number(today.externalCashFlow) || 0) + amount);
+        console.log(
+          `[ledger] ${v.venue} 外部资金流 ${amount > 0 ? "+" : ""}${amount.toFixed(2)}U ` +
+            `已调整开盘基准至 ${Number(state.dayOpenEquity).toFixed(2)}U`
+        );
+      }
+    }
+    state.processedCashFlowIds = [...processedCashFlowIds];
     delete (state as any)._rolloverVenueKeys;
 
     today.dayProfit = round(today.equity - state.dayOpenEquity);
@@ -346,6 +399,7 @@ export function ledgerPublicView(state: LedgerState = loadLedger()) {
       officialFees: d.officialFees ?? null,
       equity: d.equity,
       equityChange: d.equityChange,
+      externalCashFlow: d.externalCashFlow ?? 0,
       dayProfit: d.dayProfit,
       gridProfit: d.gridProfit,
     })),

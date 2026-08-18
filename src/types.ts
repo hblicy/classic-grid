@@ -56,6 +56,14 @@ export type VenueSnapshot = {
   liquidationPrice?: number;
   /** 账户权益（USD）；读不到则为 undefined */
   equityUsd?: number;
+  /** 外部资金流水：充值为正、提现为负；id 必须可用于重启去重 */
+  cashFlows?: ExternalCashFlow[];
+};
+
+export type ExternalCashFlow = {
+  id: string;
+  amountUsd: number;
+  timestampMs: number;
 };
 
 export type Intent =

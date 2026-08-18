@@ -29,6 +29,16 @@ type RiseExchange = {
     Array<{ orderId: string; side: string; price: number; sizeBase: number }>
   >;
   _refreshAllPositions(): Promise<unknown>;
+  getTransferHistory(limit?: number): Promise<
+    Array<{
+      amount: string;
+      type: string;
+      timestamp: string;
+      transaction_hash?: string;
+      id?: string;
+      tx_hash?: string;
+    }>
+  >;
   placeLimitOrder(o: {
     marketId: number;
     side: string;
@@ -43,6 +53,53 @@ type RiseExchange = {
   markets: Map<number, { name: string; symbol?: string }>;
 };
 
+function parseTransferTimestampMs(raw: unknown): number {
+  const value = String(raw ?? "").trim();
+  if (!value) throw new Error("RISEx 资金流水缺少 timestamp");
+  if (/^\d+$/.test(value)) {
+    const n = BigInt(value);
+    if (n >= 100_000_000_000_000_000n) return Number(n / 1_000_000n);
+    if (n >= 100_000_000_000_000n) return Number(n / 1_000n);
+    if (n >= 100_000_000_000n) return Number(n);
+    return Number(n * 1_000n);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new Error(`RISEx 资金流水 timestamp 无效: ${value}`);
+  return parsed;
+}
+
+function parseTransfer(row: {
+  amount: string;
+  type: string;
+  timestamp: string;
+  transaction_hash?: string;
+  id?: string;
+  tx_hash?: string;
+}): NonNullable<VenueSnapshot["cashFlows"]>[number] {
+  const type = String(row.type || "").trim().toLowerCase();
+  const rawAmount = Number(row.amount);
+  if (!(Number.isFinite(rawAmount) && rawAmount !== 0)) {
+    throw new Error(`RISEx 资金流水 amount 无效: ${String(row.amount)}`);
+  }
+  let sign: 1 | -1;
+  if (type === "deposit" || type === "credit" || type === "inbound") sign = 1;
+  else if (
+    type === "withdraw" ||
+    type === "withdrawal" ||
+    type === "debit" ||
+    type === "outbound"
+  ) {
+    sign = -1;
+  } else {
+    throw new Error(`未知 RISEx 资金流水类型: ${type || "(empty)"}`);
+  }
+  const timestampMs = parseTransferTimestampMs(row.timestamp);
+  const amountUsd = Math.abs(rawAmount) * sign;
+  const id = String(row.transaction_hash || row.tx_hash || row.id || "").trim() ||
+    `${type}:${row.timestamp}:${Math.abs(rawAmount)}`;
+  return { id, amountUsd, timestampMs };
+}
+
 function resolveMarketName(market: string): string {
   const m = market.toUpperCase();
   return m.includes("-") ? m : `${m}-PERP`;
@@ -52,6 +109,10 @@ export class RisexExecutor implements VenueExecutor {
   readonly id = "risex" as const;
   private ex: RiseExchange | null = null;
   private equityCache: { at: number; value: number | undefined } = { at: 0, value: undefined };
+  private cashFlowCache: {
+    at: number;
+    value: NonNullable<VenueSnapshot["cashFlows"]>;
+  } = { at: 0, value: [] };
   constructor(private dryRun: boolean) {}
 
   async connect(): Promise<void> {
@@ -126,6 +187,18 @@ export class RisexExecutor implements VenueExecutor {
     }
   }
 
+  private async readCashFlows(
+    ex: RiseExchange
+  ): Promise<NonNullable<VenueSnapshot["cashFlows"]>> {
+    const now = Date.now();
+    if (now - this.cashFlowCache.at < 300_000) return this.cashFlowCache.value;
+    const rows = await ex.getTransferHistory(1000);
+    if (!Array.isArray(rows)) throw new Error("RISEx transfer-history 返回格式无效");
+    const value = rows.map(parseTransfer);
+    this.cashFlowCache = { at: now, value };
+    return value;
+  }
+
   async snapshot(market: string): Promise<VenueSnapshot> {
     if (this.dryRun) {
       return { venue: this.id, market, mid: 100_000, position: 0, openOrders: [] };
@@ -137,6 +210,7 @@ export class RisexExecutor implements VenueExecutor {
     const mid = await ex.getPrice(marketId);
     const pos = ex.getPosition(marketId);
     const equityUsd = await this.readEquity(ex);
+    const cashFlows = await this.readCashFlows(ex);
     const all =
       typeof ex.getAllPositions === "function" ? ex.getAllPositions() : [];
     const detail =
@@ -182,6 +256,7 @@ export class RisexExecutor implements VenueExecutor {
         level: 0,
       })),
       equityUsd,
+      cashFlows,
       unrealizedPnl:
         upnl != null && Number.isFinite(Number(upnl)) ? Number(upnl) : undefined,
       liquidationPrice:
