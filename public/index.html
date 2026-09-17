@@ -733,7 +733,7 @@
       try {
         const r = await fetch(paused ? "/api/pause" : "/api/resume", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Grid-Request": "1" },
           body: JSON.stringify({ reason: "dashboard-ui" }),
         });
         const j = await r.json().catch(() => ({}));
@@ -779,7 +779,7 @@
       try {
         const r = await fetch("/api/venue-control", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Grid-Request": "1" },
           body: JSON.stringify({ venue, action: act }),
         });
         const j = await r.json().catch(() => ({}));
