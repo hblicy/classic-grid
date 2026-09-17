@@ -12,8 +12,6 @@
  * WS（可选，当前轮询即可）：wss://ws.popdex.xyz/v1/ws/public
  *   ticker / books / order / position / fill / account
  */
-import fs from "node:fs";
-import path from "node:path";
 import {
   createPublicClient,
   createWalletClient,
@@ -24,12 +22,16 @@ import {
   parseUnits,
   stringToHex,
   toHex,
+  type Address,
   type Hex,
 } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import type { Intent, LiveOrder, Side, VenueSnapshot } from "../types.js";
+import type { ApplyResult, Intent, LiveOrder, Side, VenueSnapshot } from "../types.js";
 import { loadEnv } from "../loadEnv.js";
-import { dryApply, type ApplyResult, type VenueExecutor } from "./types.js";
+import { dryApply, type VenueExecutor } from "./types.js";
+import { strictAddress } from "../popdex/agent.js";
+import { PopdexAgentRpc, type AgentInfo, type PopdexRpcRequest } from "../popdex/agentRpc.js";
+import { agentAuthorizationFailure } from "../popdex/agentService.js";
 
 const API = "https://api.popdex.xyz";
 const ORDER = "0x0000000000000000000000000000000000001000" as const;
@@ -45,7 +47,7 @@ const MarketUnit = { BaseToken: 0, QuoteToken: 1 } as const;
 const PositionSide = { None: 0, Long: 1, Short: 2 } as const;
 const OrderCategory = { Regular: 0, Plan: 1, Tpsl: 2 } as const;
 
-const placeAbi = [
+export const POPDEX_PLACE_ORDER_ABI = [
   {
     type: "function",
     name: "placeOrder",
@@ -154,7 +156,7 @@ const popdexChain = defineChain({
   rpcUrls: { default: { http: [`${API}/api/v1/web3/rpc`] } },
 });
 
-async function rpc(method: string, params: unknown[] = []): Promise<unknown> {
+async function defaultRpcRequest(method: string, params: unknown[] = []): Promise<unknown> {
   const r = await fetch(`${API}/api/v1/web3/rpc`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -165,7 +167,7 @@ async function rpc(method: string, params: unknown[] = []): Promise<unknown> {
   return j.result;
 }
 
-async function apiGet<T = any>(pathname: string): Promise<T> {
+async function defaultApiGet<T = any>(pathname: string): Promise<T> {
   const r = await fetch(`${API}${pathname}`, {
     headers: { "Content-Type": "application/json", Accept: "application/json" },
   });
@@ -176,33 +178,97 @@ async function apiGet<T = any>(pathname: string): Promise<T> {
   return j.data as T;
 }
 
-function loadPrivateKey(): Hex {
-  loadEnv();
-  let raw = (process.env.POPDEX_PRIVATE_KEY || "").trim();
-  if (!raw) {
-    const keyPath =
-      process.env.POPDEX_KEY_PATH?.trim() ||
-      path.resolve(process.cwd(), "secrets", "popdex.key");
-    if (fs.existsSync(keyPath)) raw = fs.readFileSync(keyPath, "utf8").trim();
+export function resolvePopdexIdentity(env: NodeJS.ProcessEnv): {
+  mainAccount: Address;
+  agentAccount: PrivateKeyAccount;
+} {
+  if (String(env.POPDEX_PRIVATE_KEY || "").trim()) {
+    throw new Error("PopDEX 旧配置 POPDEX_PRIVATE_KEY 已停用；请改用代理钱包模式。");
   }
-  if (!raw) throw new Error("缺少 POPDEX_PRIVATE_KEY（或 secrets/popdex.key）");
-  return (raw.startsWith("0x") ? raw : `0x${raw}`) as Hex;
+  if (String(env.POPDEX_KEY_PATH || "").trim()) {
+    throw new Error("PopDEX 旧配置 POPDEX_KEY_PATH 已停用；请改用代理钱包模式。");
+  }
+  const rawMain = String(env.POPDEX_MAIN_ACCOUNT || "").trim();
+  const rawAgentKey = String(env.POPDEX_AGENT_PRIVATE_KEY || "").trim();
+  if (!rawMain) throw new Error("PopDEX 缺少 POPDEX_MAIN_ACCOUNT。");
+  if (!rawAgentKey) throw new Error("PopDEX 缺少 POPDEX_AGENT_PRIVATE_KEY。");
+  const mainAccount = strictAddress(rawMain, "mainAccount");
+  let agentAccount: PrivateKeyAccount;
+  try {
+    agentAccount = privateKeyToAccount(rawAgentKey as Hex);
+  } catch {
+    throw new Error("PopDEX Agent 私钥格式无效。");
+  }
+  if (mainAccount === agentAccount.address) {
+    throw new Error("PopDEX Agent 地址与主账户不能相同。");
+  }
+  return { mainAccount, agentAccount };
 }
+
+type WalletClientLike = {
+  sendTransaction(transaction: Record<string, unknown>): Promise<Hex>;
+};
+
+type PublicClientLike = {
+  getTransactionReceipt(input: { hash: Hex }): Promise<{ status: "success" | "reverted" } | null>;
+};
+
+type AgentRpcLike = {
+  verifyChain(): Promise<void>;
+  getAgentInfo(agentAddress: string): Promise<AgentInfo>;
+};
+
+export type PopdexExecutorDeps = {
+  env?: NodeJS.ProcessEnv;
+  apiGet?: <T = any>(pathname: string) => Promise<T>;
+  rpcRequest?: PopdexRpcRequest;
+  agentRpc?: AgentRpcLike;
+  createWallet?: (account: PrivateKeyAccount) => WalletClientLike;
+  createPublic?: () => PublicClientLike;
+  sleep?: (ms: number) => Promise<void>;
+};
 
 export class PopdexExecutor implements VenueExecutor {
   readonly id = "popdex" as const;
-  private account: PrivateKeyAccount | null = null;
-  private address = "";
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly apiGet: <T = any>(pathname: string) => Promise<T>;
+  private readonly rpcRequest: PopdexRpcRequest;
+  private readonly agentRpc: AgentRpcLike;
+  private readonly createWallet: (account: PrivateKeyAccount) => WalletClientLike;
+  private readonly createPublic: () => PublicClientLike;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private agentAccount: PrivateKeyAccount | null = null;
+  private mainAccount: Address | null = null;
   private symbol = DEFAULT_SYMBOL;
   private symbolId = DEFAULT_SYMBOL_ID;
   private tickSize = 1;
   private lotSize = 0.0001;
   private minQty = 0.0001;
   private minNotional = 10;
-  private wallet: ReturnType<typeof createWalletClient> | null = null;
-  private pub: ReturnType<typeof createPublicClient> | null = null;
+  private wallet: WalletClientLike | null = null;
+  private pub: PublicClientLike | null = null;
 
-  constructor(private dryRun: boolean) {}
+  constructor(
+    private dryRun: boolean,
+    deps: PopdexExecutorDeps = {}
+  ) {
+    this.env = deps.env ?? process.env;
+    this.apiGet = deps.apiGet ?? defaultApiGet;
+    this.rpcRequest = deps.rpcRequest ?? defaultRpcRequest;
+    this.agentRpc = deps.agentRpc ?? new PopdexAgentRpc({ request: this.rpcRequest });
+    const transport = custom({
+      request: async ({ method, params }) =>
+        this.rpcRequest(method, (params as unknown[]) ?? []),
+    });
+    this.createWallet =
+      deps.createWallet ??
+      ((account) =>
+        createWalletClient({ account, chain: popdexChain, transport }) as unknown as WalletClientLike);
+    this.createPublic =
+      deps.createPublic ??
+      (() => createPublicClient({ chain: popdexChain, transport }) as unknown as PublicClientLike);
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
 
   private roundPrice(px: number): number {
     const t = this.tickSize > 0 ? this.tickSize : 1;
@@ -226,10 +292,10 @@ export class PopdexExecutor implements VenueExecutor {
   }
 
   async connect(): Promise<void> {
-    loadEnv();
-    this.symbol = (process.env.POPDEX_SYMBOL || DEFAULT_SYMBOL).trim() || DEFAULT_SYMBOL;
+    if (this.env === process.env) loadEnv();
+    this.symbol = (this.env.POPDEX_SYMBOL || DEFAULT_SYMBOL).trim() || DEFAULT_SYMBOL;
     try {
-      const cfg = await apiGet<any>(
+      const cfg = await this.apiGet<any>(
         `/api/v1/config/symbol?symbol=${encodeURIComponent(this.symbol)}&category=Futures`
       );
       this.symbolId = Math.max(1, num(cfg.symbolId, DEFAULT_SYMBOL_ID));
@@ -241,46 +307,44 @@ export class PopdexExecutor implements VenueExecutor {
       console.warn(`[popdex] symbol config fallback: ${String(e?.message || e).slice(0, 120)}`);
     }
 
-    if (this.dryRun && !(process.env.POPDEX_PRIVATE_KEY || "").trim()) {
-      const keyPath =
-        process.env.POPDEX_KEY_PATH?.trim() ||
-        path.resolve(process.cwd(), "secrets", "popdex.key");
-      if (!fs.existsSync(keyPath)) {
-        console.log(
-          `[popdex] dry-run connected symbol=${this.symbol} id=${this.symbolId} (no key)`
-        );
-        return;
-      }
+    const privateConfigured = [
+      this.env.POPDEX_PRIVATE_KEY,
+      this.env.POPDEX_KEY_PATH,
+      this.env.POPDEX_MAIN_ACCOUNT,
+      this.env.POPDEX_AGENT_PRIVATE_KEY,
+    ].some((value) => String(value || "").trim().length > 0);
+    if (this.dryRun && !privateConfigured) {
+      console.log(`[popdex] dry-run connected symbol=${this.symbol} id=${this.symbolId} (public only)`);
+      return;
     }
 
-    const pk = loadPrivateKey();
-    this.account = privateKeyToAccount(pk);
-    this.address = this.account.address;
-    const transport = custom({
-      async request({ method, params }) {
-        return rpc(method, (params as unknown[]) ?? []);
-      },
-    });
-    this.wallet = createWalletClient({
-      account: this.account,
-      chain: popdexChain,
-      transport,
-    });
-    this.pub = createPublicClient({ chain: popdexChain, transport });
+    const identity = resolvePopdexIdentity(this.env);
+    await this.agentRpc.verifyChain();
+    const info = await this.agentRpc.getAgentInfo(identity.agentAccount.address);
+    const reason = agentAuthorizationFailure(
+      identity.mainAccount,
+      identity.agentAccount.address,
+      info
+    );
+    if (reason) throw new Error(`PopDEX Agent 尚未获得有效授权：${reason}。`);
+    this.mainAccount = identity.mainAccount;
+    this.agentAccount = identity.agentAccount;
+    this.wallet = this.createWallet(identity.agentAccount);
+    this.pub = this.createPublic();
     console.log(
-      `[popdex] address=${this.address} symbol=${this.symbol} id=${this.symbolId} tick=${this.tickSize} lot=${this.lotSize}`
+      `[popdex] main=${this.mainAccount} agent=${this.agentAccount.address} symbol=${this.symbol} id=${this.symbolId} tick=${this.tickSize} lot=${this.lotSize}`
     );
   }
 
   disconnect(): void {
-    this.account = null;
+    this.agentAccount = null;
+    this.mainAccount = null;
     this.wallet = null;
     this.pub = null;
-    this.address = "";
   }
 
   private async mid(): Promise<number> {
-    const rows = await apiGet<any[]>(
+    const rows = await this.apiGet<any[]>(
       `/api/v1/public/market/tickers?category=Futures&symbol=${encodeURIComponent(this.symbol)}`
     );
     const list = Array.isArray(rows) ? rows : [];
@@ -298,16 +362,17 @@ export class PopdexExecutor implements VenueExecutor {
   }
 
   async snapshot(market: string): Promise<VenueSnapshot> {
-    if (this.dryRun && !this.address) {
+    if (this.dryRun && !this.mainAccount) {
       const mid = await this.mid().catch(() => 100_000);
       return { venue: this.id, market, mid, position: 0, openOrders: [] };
     }
-    const addr = this.address || (await this.resolveAddressOnly());
+    const addr = this.mainAccount;
+    if (!addr) throw new Error("PopDEX 未 connect");
     const mid = await this.mid();
     const [overview, positions, orders] = await Promise.all([
-      apiGet<any>(`/api/v1/account/${addr}/overview`).catch(() => null),
-      apiGet<any[]>(`/api/v1/account/${addr}/positions`).catch(() => []),
-      apiGet<any[]>(
+      this.apiGet<any>(`/api/v1/account/${addr}/overview`).catch(() => null),
+      this.apiGet<any[]>(`/api/v1/account/${addr}/positions`).catch(() => []),
+      this.apiGet<any[]>(
         `/api/v1/account/${addr}/orders?status=pending&category=Futures&symbol=${encodeURIComponent(this.symbol)}`
       ).catch(() => []),
     ]);
@@ -362,19 +427,12 @@ export class PopdexExecutor implements VenueExecutor {
     };
   }
 
-  private async resolveAddressOnly(): Promise<string> {
-    if (this.address) return this.address;
-    const pk = loadPrivateKey();
-    this.account = privateKeyToAccount(pk);
-    this.address = this.account.address;
-    return this.address;
-  }
-
   private async send(to: Hex, data: Hex, gas = 500_000n): Promise<Hex> {
-    if (!this.wallet || !this.pub || !this.account) {
+    if (!this.wallet || !this.pub || !this.agentAccount) {
       throw new Error("PopDEX 未 connect");
     }
     const hash = await this.wallet.sendTransaction({
+      account: this.agentAccount,
       to,
       data,
       value: 0n,
@@ -382,7 +440,7 @@ export class PopdexExecutor implements VenueExecutor {
       gasPrice: 0n,
     });
     for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 400));
+      await this.sleep(400);
       const receipt = await this.pub.getTransactionReceipt({ hash }).catch(() => null);
       if (receipt) {
         if (receipt.status !== "success") {
@@ -398,7 +456,7 @@ export class PopdexExecutor implements VenueExecutor {
   async apply(intents: Intent[]): Promise<ApplyResult> {
     if (this.dryRun) return dryApply(this.id, intents);
     const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
-    const gapMs = Math.max(0, Number(process.env.POPDEX_ORDER_GAP_MS || 200) || 200);
+    const gapMs = Math.max(0, Number(this.env.POPDEX_ORDER_GAP_MS || 200) || 200);
     let wrote = 0;
     let liveMid = 0;
     try {
@@ -415,9 +473,9 @@ export class PopdexExecutor implements VenueExecutor {
           const data = encodeFunctionData({
             abi: cancelAbi,
             functionName: "cancelOrder",
-            args: [this.address as Hex, BigInt(id), pad("0x", { size: 32 })],
+            args: [this.mainAccount!, BigInt(id), pad("0x", { size: 32 })],
           });
-          if (wrote > 0 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+          if (wrote > 0 && gapMs > 0) await this.sleep(gapMs);
           await this.send(ORDER, data, 300_000n);
           result.cancelled += 1;
           wrote += 1;
@@ -438,7 +496,7 @@ export class PopdexExecutor implements VenueExecutor {
             }
           }
 
-          if (wrote > 0 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+          if (wrote > 0 && gapMs > 0) await this.sleep(gapMs);
           const oid = clientOid(`g${Date.now().toString(36)}${wrote}`);
           const orderParams = packOrderParams({
             category: Category.Futures,
@@ -449,10 +507,10 @@ export class PopdexExecutor implements VenueExecutor {
             positionSide: PositionSide.None,
           });
           const data = encodeFunctionData({
-            abi: placeAbi,
+            abi: POPDEX_PLACE_ORDER_ABI,
             functionName: "placeOrder",
             args: [
-              this.address as Hex,
+              this.mainAccount!,
               oid,
               this.symbolId,
               orderParams,
@@ -484,7 +542,7 @@ export class PopdexExecutor implements VenueExecutor {
       abi: cancelAllAbi,
       functionName: "cancelAllOrders",
       args: [
-        this.address as Hex,
+        this.mainAccount!,
         this.symbolId,
         { isSome: true, value: Category.Futures },
         { isSome: true, value: OrderCategory.Regular },
@@ -516,10 +574,10 @@ export class PopdexExecutor implements VenueExecutor {
     });
     const oid = clientOid(`c${Date.now().toString(36)}`);
     const data = encodeFunctionData({
-      abi: placeAbi,
+      abi: POPDEX_PLACE_ORDER_ABI,
       functionName: "placeOrder",
       args: [
-        this.address as Hex,
+        this.mainAccount!,
         oid,
         this.symbolId,
         orderParams,

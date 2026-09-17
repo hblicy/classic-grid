@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import type { VenueId } from "./types.js";
 import { loadEnv } from "./loadEnv.js";
 import { DecibelLive } from "./venues/decibelLive.js";
+import { strictAddress } from "./popdex/agent.js";
 
 export type OfficialVenueDay = {
   venue: VenueId;
@@ -627,22 +628,16 @@ async function fetchNado(since: number): Promise<OfficialVenueDay> {
   }
 }
 
+export function resolvePopdexStatsAddress(env: NodeJS.ProcessEnv): string {
+  const raw = String(env.POPDEX_MAIN_ACCOUNT || "").trim();
+  if (!raw) throw new Error("无 POPDEX_MAIN_ACCOUNT");
+  return strictAddress(raw, "mainAccount");
+}
+
 async function fetchPopdex(since: number): Promise<OfficialVenueDay> {
   try {
     loadEnv();
-    let addr = (process.env.POPDEX_ADDRESS || "").trim();
-    if (!addr) {
-      const keyPath =
-        process.env.POPDEX_KEY_PATH?.trim() ||
-        path.resolve(process.cwd(), "secrets", "popdex.key");
-      const raw =
-        (process.env.POPDEX_PRIVATE_KEY || "").trim() ||
-        (fs.existsSync(keyPath) ? fs.readFileSync(keyPath, "utf8").trim() : "");
-      if (!raw) return empty("popdex", "无 POPDEX_PRIVATE_KEY / secrets/popdex.key");
-      const { privateKeyToAccount } = await import("viem/accounts");
-      const pk = (raw.startsWith("0x") ? raw : `0x${raw}`) as `0x${string}`;
-      addr = privateKeyToAccount(pk).address;
-    }
+    const addr = resolvePopdexStatsAddress(process.env);
     let volume = 0;
     let fees = 0;
     let fills = 0;

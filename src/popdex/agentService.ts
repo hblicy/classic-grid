@@ -51,6 +51,26 @@ function exactExpiry(value: string): bigint {
   return BigInt(value);
 }
 
+export function agentAuthorizationFailure(
+  mainAccount: string,
+  agentAddress: string,
+  info: AgentInfo,
+  nowMs = Date.now()
+): string | null {
+  const main = strictAddress(mainAccount, "mainAccount");
+  const agent = strictAddress(agentAddress, "agentAddress");
+  if (main === agent) throw new Error("PopDEX Agent 地址与主账户不能相同。");
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    throw new Error("PopDEX Agent 当前时间无效。");
+  }
+  const expiry = exactExpiry(info.expiresAt);
+  if (!info.exists) return "Agent 不存在或已撤销";
+  if (info.isExpired || expiry <= BigInt(nowMs)) return "Agent 授权已过期";
+  if (info.delegator !== main) return "Agent delegator 与主账户不一致";
+  if (info.isGlobal) return "Agent 被授权为全局权限";
+  return null;
+}
+
 export class PopdexAgentService {
   private readonly rpcClient: AgentRpc;
   private readonly envFile: string;
@@ -91,20 +111,10 @@ export class PopdexAgentService {
   ): Promise<PublicAgentStatus & { info: AgentInfo }> {
     const main = strictAddress(mainAccount, "mainAccount");
     const agent = strictAddress(agentAddress, "agentAddress");
-    if (main === agent) throw new Error("PopDEX Agent 地址与主账户不能相同。");
     await this.rpcClient.verifyChain();
     const info = await this.rpcClient.getAgentInfo(agent);
-    const expiry = exactExpiry(info.expiresAt);
     const nowMs = this.now();
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
-      throw new Error("PopDEX Agent 当前时间无效。");
-    }
-
-    let reason: string | null = null;
-    if (!info.exists) reason = "Agent 不存在或已撤销";
-    else if (info.isExpired || expiry <= BigInt(nowMs)) reason = "Agent 授权已过期";
-    else if (info.delegator !== main) reason = "Agent delegator 与主账户不一致";
-    else if (info.isGlobal) reason = "Agent 被授权为全局权限";
+    const reason = agentAuthorizationFailure(main, agent, info, nowMs);
 
     return {
       configured: true,
