@@ -23,6 +23,7 @@ import {
   allVenueControl,
   enqueueVenueCommand,
   getPendingCommands,
+  isVenuePaused,
   loadVenueControl,
   type VenueControlAction,
 } from "./venueControl.js";
@@ -34,6 +35,8 @@ import {
   sendUnauthorized,
   validateMutationRequest,
 } from "./dashboardSecurity.js";
+import { PopdexAgentService } from "./popdex/agentService.js";
+import { PopdexAgentRpc } from "./popdex/agentRpc.js";
 
 export type DashboardVenueRow = {
   venue: string;
@@ -78,6 +81,14 @@ export type DashboardSnapshot = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
+const ETHERS_JS_FILE = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "ethers",
+  "dist",
+  "ethers.umd.min.js"
+);
 
 loadBotPauseState();
 loadVenueControl();
@@ -187,6 +198,15 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
 
 export type DashboardServerOptions = {
   env?: NodeJS.ProcessEnv;
+  agentService?: Pick<
+    PopdexAgentService,
+    | "status"
+    | "prepareApproval"
+    | "verifyAuthorization"
+    | "save"
+    | "prepareRevoke"
+    | "clear"
+  >;
 };
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -202,9 +222,23 @@ export function startDashboardServer(
   options: DashboardServerOptions = {}
 ): http.Server | null {
   if (!(port >= 0)) return null;
-  const security = dashboardSecurityConfig(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  const security = dashboardSecurityConfig(env);
+  const agentService =
+    options.agentService ??
+    new PopdexAgentService({
+      rpcClient: new PopdexAgentRpc(),
+      envFile: path.resolve(process.cwd(), ".env"),
+      processEnv: env,
+      canMutate: () => {
+        const popdexVisible = snapshot.venues.some((venue) => venue.venue === "popdex");
+        if (snapshot.dryRun || !popdexVisible || snapshot.paused) return true;
+        return isVenuePaused("popdex");
+      },
+    });
 
   const server = http.createServer(async (req, res) => {
+    const sensitiveValues: string[] = [];
     try {
       if (!authorizeRequest(req, security)) {
         sendUnauthorized(res);
@@ -231,6 +265,66 @@ export function startDashboardServer(
           port,
           bindHost: security.bindHost,
         });
+        return;
+      }
+      if (url === "/api/popdex/agent/status" && req.method === "GET") {
+        sendJson(res, 200, await agentService.status());
+        return;
+      }
+      if (url === "/api/popdex/agent/prepare-approval" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.prepareApproval({
+            agentAddress: String(body.agentAddress || ""),
+            delegator: String(body.delegator || ""),
+            hostname: String(body.hostname || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/verify" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.verifyAuthorization({
+            mainAccount: String(body.mainAccount || ""),
+            agentAddress: String(body.agentAddress || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/save" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        const agentPrivateKey = String(body.agentPrivateKey || "");
+        if (agentPrivateKey) sensitiveValues.push(agentPrivateKey);
+        sendJson(
+          res,
+          200,
+          await agentService.save({
+            mainAccount: String(body.mainAccount || ""),
+            agentPrivateKey,
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/prepare-revoke" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.prepareRevoke({
+            mainAccount: String(body.mainAccount || ""),
+            agentAddress: String(body.agentAddress || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/clear" && req.method === "POST") {
+        await readJsonBody(req, 4096);
+        sendJson(res, 200, await agentService.clear());
         return;
       }
       if (
@@ -365,6 +459,33 @@ export function startDashboardServer(
         });
         return;
       }
+      if (url === "/vendor/ethers.js") {
+        if (!fs.existsSync(ETHERS_JS_FILE)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("ethers browser bundle missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "public, max-age=31536000, immutable",
+        });
+        fs.createReadStream(ETHERS_JS_FILE).pipe(res);
+        return;
+      }
+      if (url === "/popdex-agent.js") {
+        const scriptPath = path.join(PUBLIC_DIR, "popdex-agent.js");
+        if (!fs.existsSync(scriptPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("public/popdex-agent.js missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(fs.readFileSync(scriptPath));
+        return;
+      }
       if (url === "/" || url === "/index.html") {
         const htmlPath = path.join(PUBLIC_DIR, "index.html");
         if (!fs.existsSync(htmlPath)) {
@@ -384,7 +505,9 @@ export function startDashboardServer(
       res.end("not found");
     } catch (error) {
       const status = error instanceof HttpRequestError ? error.statusCode : 400;
-      const message = String(error instanceof Error ? error.message : error).slice(0, 240);
+      let message = String(error instanceof Error ? error.message : error);
+      for (const value of sensitiveValues) message = message.replaceAll(value, "[REDACTED]");
+      message = message.slice(0, 240);
       sendJson(res, status, { ok: false, error: message });
     }
   });
