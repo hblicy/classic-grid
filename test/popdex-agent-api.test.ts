@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import http, { type Server } from "node:http";
 import test from "node:test";
-import { startDashboardServer } from "../src/dashboard.js";
+import {
+  popdexAgentMutationAllowed,
+  startDashboardServer,
+} from "../src/dashboard.js";
 import { POPDEX_ACCOUNT_PRECOMPILE } from "../src/popdex/agent.js";
 
 const TOKEN = "1234567890abcdef";
@@ -106,6 +109,36 @@ function fakeService(options: { failSave?: boolean } = {}) {
     },
   };
 }
+
+test("live configured PopDEX blocks Agent mutation before snapshot visibility", () => {
+  assert.equal(
+    popdexAgentMutationAllowed({
+      dryRun: false,
+      popdexConfigured: true,
+      globallyPaused: false,
+      venuePaused: false,
+    }),
+    false
+  );
+  assert.equal(
+    popdexAgentMutationAllowed({
+      dryRun: false,
+      popdexConfigured: true,
+      globallyPaused: true,
+      venuePaused: false,
+    }),
+    true
+  );
+  assert.equal(
+    popdexAgentMutationAllowed({
+      dryRun: true,
+      popdexConfigured: true,
+      globallyPaused: false,
+      venuePaused: false,
+    }),
+    true
+  );
+});
 
 test("Dashboard maps all six protected Agent routes", async () => {
   const service = fakeService();

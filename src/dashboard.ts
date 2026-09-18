@@ -198,6 +198,7 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
 
 export type DashboardServerOptions = {
   env?: NodeJS.ProcessEnv;
+  popdexConfigured?: boolean;
   agentService?: Pick<
     PopdexAgentService,
     | "status"
@@ -208,6 +209,20 @@ export type DashboardServerOptions = {
     | "clear"
   >;
 };
+
+export function popdexAgentMutationAllowed(input: {
+  dryRun: boolean;
+  popdexConfigured: boolean;
+  globallyPaused: boolean;
+  venuePaused: boolean;
+}): boolean {
+  return (
+    input.dryRun ||
+    !input.popdexConfigured ||
+    input.globallyPaused ||
+    input.venuePaused
+  );
+}
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
@@ -230,11 +245,13 @@ export function startDashboardServer(
       rpcClient: new PopdexAgentRpc(),
       envFile: path.resolve(process.cwd(), ".env"),
       processEnv: env,
-      canMutate: () => {
-        const popdexVisible = snapshot.venues.some((venue) => venue.venue === "popdex");
-        if (snapshot.dryRun || !popdexVisible || snapshot.paused) return true;
-        return isVenuePaused("popdex");
-      },
+      canMutate: () =>
+        popdexAgentMutationAllowed({
+          dryRun: snapshot.dryRun,
+          popdexConfigured: options.popdexConfigured ?? false,
+          globallyPaused: snapshot.paused,
+          venuePaused: isVenuePaused("popdex"),
+        }),
     });
 
   const server = http.createServer(async (req, res) => {
