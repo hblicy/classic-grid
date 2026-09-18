@@ -56,6 +56,16 @@ Dashboard 中来自 snapshot 的 `lastError` 必须先经过统一 HTML 转义�
 
 前端不信任服务端声明的 action，而以 ABI selector 和解码参数为准。钱包仍保留最终用户确认步骤。
 
+#### replace 目标的独立绑定
+
+浏览器切换到 PopDEX 链后，通过钱包 provider 直接 `eth_call` Account precompile 的 `getAgents(mainAccount)`，按当前 hostname 派生的 bytes32 name 查找同名 Agent。该读取不经过 Dashboard 的 prepared-transaction API：
+
+- 无同名 Agent 时，当前意图只能是 `approveAgent`。
+- 恰有一个同名 Agent 时，当前意图只能是 `replaceAgent`，并把该地址作为精确 `oldAgent`。
+- 同名 Agent 不唯一、数组长度不一致、返回值无法解码或新旧 Agent 相同时，拒绝继续。
+
+服务端返回的 `action` 与 `replacedAgent` 不作为信任依据。浏览器先把 calldata 与上述独立意图完成校验，再根据解码后的操作生成确认文案；replace 确认中同时显示旧 Agent 和新 Agent。这样不能出现页面显示“授权新 Agent”却实际发送替换交易，也不能把任意其他旧 Agent 带入钱包请求。
+
 ## `.env` 持久化
 
 `setEnvLine` 改为按行重建内容：删除所有活动或注释形式的同名 key，再追加唯一的新值或唯一注释行。这样保存和清除都不会遗留重复私钥。
@@ -77,7 +87,7 @@ Dashboard 中来自 snapshot 的 `lastError` 必须先经过统一 HTML 转义�
 - service 测试验证 approval pause gate、过期/global 撤销、delegator 拒绝、重复 env key 清理。
 - env writer 测试使用真实临时目录验证原子替换和写入失败时原文件保留。
 - Dashboard security 测试验证 loopback Host allowlist 和 DNS rebinding Host 拒绝。
-- UI 测试验证恶意 `lastError` 只作为文本、prepared transaction 的合法与篡改输入、撤销后独立清理重试。
+- UI 测试验证恶意 `lastError` 只作为文本、prepared transaction 的合法与篡改输入、钱包 RPC 独立选择 approve/replace、selector/action 不一致与 `oldAgent` 篡改拒绝、撤销后独立清理重试。
 - API/启动测试验证配置了 PopDEX 的 live 启动窗口默认拒绝身份修改，暂停后允许。
 
 最终运行完整 `npm test`、TypeScript `tsc --noEmit`（若仓库已有无关基线错误则精确区分）以及目标恶意输入复现。不会发送真实链上交易；真实 PopDEX 测试网验证作为剩余外部验证项报告。
@@ -89,6 +99,7 @@ Dashboard 中来自 snapshot 的 `lastError` 必须先经过统一 HTML 转义�
 - 过期/global Agent 可由其 delegator 撤销，其他账户不可撤销。
 - 撤销成功后的本地清理可以独立重试。
 - 恶意错误 HTML 不执行，prepared transaction 任一关键字段或 ABI 参数被篡改都会在钱包调用前失败。
+- approve/replace 必须与钱包 RPC 独立读取的同名 Agent 状态一致，确认文案只能来自校验后的 selector；replace 的 `oldAgent` 必须精确匹配并展示给用户。
 - 无 Token 模式拒绝非 loopback Host。
 - `.env` 更新只保留一个目标 key，失败不损坏原文件。
 - 全部相关回归测试及原有测试通过。
