@@ -123,7 +123,7 @@ test("save writes only main account and Agent key after exact verification", asy
   assert.equal(ctx.processEnv.POPDEX_MAIN_ACCOUNT, MAIN);
   assert.equal(ctx.processEnv.POPDEX_AGENT_PRIVATE_KEY, AGENT_KEY);
   assert.doesNotMatch(JSON.stringify(status), new RegExp(AGENT_KEY));
-  assert.deepEqual(ctx.fsImpl.chmods, [0o600, 0o600]);
+  assert.deepEqual(ctx.fsImpl.chmods, [0o600]);
   assert.equal(ctx.fsImpl.writes[0]?.mode, 0o600);
 });
 

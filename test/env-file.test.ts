@@ -20,7 +20,7 @@ test("writeEnvFile atomically renames a same-directory temporary file", () => {
 
   assert.match(calls[0]!, /^write:C:\/app\/\.env\.tmp-/);
   assert.ok(calls.some((call) => /rename:.*->C:\/app\/\.env$/.test(call)));
-  assert.equal(calls.at(-1), "chmod:C:/app/.env");
+  assert.match(calls.at(-1)!, /rename:.*->C:\/app\/\.env$/);
 });
 
 test("writeEnvFile preserves the target when temporary writing fails", () => {

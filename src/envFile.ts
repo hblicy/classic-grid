@@ -22,7 +22,6 @@ export function writeEnvFile(
     fsImpl.writeFileSync(tempFile, content, { encoding: "utf8", mode: 0o600 });
     if (platform !== "win32") fsImpl.chmodSync(tempFile, 0o600);
     fsImpl.renameSync(tempFile, envFile);
-    if (platform !== "win32") fsImpl.chmodSync(envFile, 0o600);
   } catch (error) {
     try {
       if (fsImpl.existsSync(tempFile)) fsImpl.unlinkSync(tempFile);

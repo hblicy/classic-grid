@@ -9,6 +9,7 @@ const scriptPath = path.resolve("public/popdex-agent.js");
 test("Dashboard includes local ethers and the complete Agent controls", () => {
   assert.match(html, /\/vendor\/ethers\.js\?v=6\.13\.5-umd/);
   assert.match(html, /\/popdex-agent\.js/);
+  assert.match(html, /授权、替换、保存、撤销或清理前请先暂停 PopDEX/);
   for (const id of [
     "popdex-agent-generate",
     "popdex-agent-copy",

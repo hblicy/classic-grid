@@ -60,7 +60,7 @@ export function authorizeRequest(
   req: IncomingMessage,
   config: DashboardSecurityConfig
 ): boolean {
-  if (!config.authRequired) return true;
+  if (!config.authRequired) return isLoopbackHost(singleHeader(req, "host"));
   const credentials = parseBasic(req.headers.authorization);
   if (!credentials) return false;
   return (
@@ -82,6 +82,16 @@ function singleHeader(req: IncomingMessage, name: string): string | undefined {
   const value = req.headers[name];
   if (Array.isArray(value)) return value.length === 1 ? value[0] : undefined;
   return value;
+}
+
+function isLoopbackHost(host: string | undefined): boolean {
+  if (!host) return false;
+  try {
+    const hostname = new URL(`http://${host}`).hostname.toLowerCase();
+    return ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function validateMutationRequest(
@@ -112,10 +122,7 @@ export function validateMutationRequest(
   ) {
     throw new HttpRequestError(403, "Origin 与当前 Dashboard 不同源");
   }
-  if (
-    !config.authRequired &&
-    !new Set(["localhost", "127.0.0.1", "[::1]"]).has(origin.hostname.toLowerCase())
-  ) {
+  if (!config.authRequired && !isLoopbackHost(host)) {
     throw new HttpRequestError(403, "无 Token 模式只允许 loopback Host");
   }
 }

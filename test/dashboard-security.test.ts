@@ -41,7 +41,10 @@ test("token enables Basic Auth and wrong credentials are rejected", () => {
 });
 
 test("missing token forces loopback and short tokens fail startup", () => {
-  assert.equal(dashboardSecurityConfig({}).bindHost, "127.0.0.1");
+  const loopback = dashboardSecurityConfig({});
+  assert.equal(loopback.bindHost, "127.0.0.1");
+  assert.equal(authorizeRequest(request({ host: "localhost:8088" }), loopback), true);
+  assert.equal(authorizeRequest(request({ host: "rebind.example:8088" }), loopback), false);
   assert.throws(
     () => dashboardSecurityConfig({ DASHBOARD_TOKEN: "too-short" }),
     /至少 16 个字符/
