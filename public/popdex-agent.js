@@ -135,28 +135,6 @@
     return account;
   }
 
-  function checkedTransaction(prepared, account) {
-    if (
-      !prepared ||
-      prepared.from !== account ||
-      typeof prepared.to !== "string" ||
-      typeof prepared.data !== "string" ||
-      prepared.chainId !== POPDEX_CHAIN_ID
-    ) {
-      throw new Error("服务端返回的 Agent 交易参数与当前钱包不一致。");
-    }
-    return {
-      from: account,
-      to: prepared.to,
-      data: prepared.data,
-      value: prepared.value,
-      chainId: prepared.chainId,
-      type: prepared.type,
-      gas: prepared.gas,
-      gasPrice: prepared.gasPrice,
-    };
-  }
-
   async function sendAndConfirm(transaction) {
     const transactionHash = await window.ethereum.request({
       method: "eth_sendTransaction",
@@ -186,7 +164,19 @@
     }
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(checkedTransaction(prepared, mainAccount));
+      transactionHash = await sendAndConfirm(
+        DashboardSafety.checkedAgentTransaction(
+          ethers,
+          prepared,
+          mainAccount,
+          {
+            kind: "authorize",
+            agentAddress: generatedAgentAddress,
+            delegator: mainAccount,
+            hostname: window.location.hostname,
+          }
+        )
+      );
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
       connectedMainAccount = mainAccount;
       authorizationVerified = true;
@@ -259,7 +249,14 @@
     }
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(checkedTransaction(prepared, mainAccount));
+      transactionHash = await sendAndConfirm(
+        DashboardSafety.checkedAgentTransaction(
+          ethers,
+          prepared,
+          mainAccount,
+          { kind: "revoke", agentAddress: status.agentAddress }
+        )
+      );
       await waitUntilRevoked(mainAccount, status.agentAddress);
       await clearAgent();
       generatedPrivateKey = null;
