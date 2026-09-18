@@ -84,7 +84,13 @@ function fakeService(options: { failSave?: boolean } = {}) {
     calls,
     async status() {
       calls.push("status");
-      return { configured: true, mainAccount: MAIN, agentAddress: AGENT, authorized: true };
+      return {
+        configured: true,
+        exists: true,
+        mainAccount: MAIN,
+        agentAddress: AGENT,
+        authorized: true,
+      };
     },
     async prepareApproval(body: any) {
       calls.push(`prepare:${body.agentAddress}`);

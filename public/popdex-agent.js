@@ -57,9 +57,14 @@
     if (!generatedAgentAddress) {
       byId("popdex-agent-address").textContent = status.agentAddress || "—";
     }
-    byId("popdex-agent-revoke").disabled = !(status.configured && status.authorized);
+    byId("popdex-agent-revoke").disabled = !(status.configured && status.exists);
+    byId("popdex-agent-clear").disabled = !(
+      status.configured && status.exists === false
+    );
     if (!status.configured) {
       setStatus("未配置临时 Agent");
+    } else if (status.exists === false) {
+      setStatus("链上 Agent 已撤销，可清除本地私钥。", "down");
     } else if (status.authorized) {
       setStatus(
         `已授权，有效期至 ${new Date(Number(status.expiresAt)).toLocaleString("zh-CN")}`,
@@ -222,7 +227,7 @@
         status.configured &&
         status.mainAccount === mainAccount &&
         status.agentAddress === agentAddress &&
-        status.authorized === false
+        status.exists === false
       ) {
         renderStatus(status);
         return;
@@ -234,10 +239,43 @@
     );
   }
 
+  function resetAgentState(message) {
+    generatedPrivateKey = null;
+    generatedAgentAddress = null;
+    connectedMainAccount = null;
+    authorizationVerified = false;
+    byId("popdex-agent-private").textContent = message;
+    byId("popdex-agent-copy").disabled = true;
+    byId("popdex-agent-authorize").disabled = true;
+    byId("popdex-agent-save").disabled = true;
+  }
+
+  async function clearLocalAgent(skipConfirmation = false) {
+    const status = await refresh();
+    if (!status || !status.configured || status.exists !== false) {
+      throw new Error("只有链上已不存在的 Agent 才能清除本地私钥。");
+    }
+    if (
+      !skipConfirmation &&
+      !window.confirm("确认清除本地 Agent 私钥？链上 Agent 必须已经撤销。")
+    ) {
+      return;
+    }
+    await clearAgent();
+    resetAgentState("已清除本地 Agent 私钥");
+    await refresh();
+  }
+
   async function revokeAgent() {
     const status = await refresh();
-    if (!status || !status.configured || !status.authorized || !status.mainAccount || !status.agentAddress) {
-      throw new Error("当前没有可撤销的有效 Agent。");
+    if (
+      !status ||
+      !status.configured ||
+      !status.exists ||
+      !status.mainAccount ||
+      !status.agentAddress
+    ) {
+      throw new Error("当前没有可撤销的链上 Agent。");
     }
     const mainAccount = await connectWallet(status.mainAccount);
     const prepared = await prepareRevoke({
@@ -258,16 +296,7 @@
         )
       );
       await waitUntilRevoked(mainAccount, status.agentAddress);
-      await clearAgent();
-      generatedPrivateKey = null;
-      generatedAgentAddress = null;
-      connectedMainAccount = null;
-      authorizationVerified = false;
-      byId("popdex-agent-private").textContent = "已撤销并清除本地 Agent 私钥";
-      byId("popdex-agent-copy").disabled = true;
-      byId("popdex-agent-authorize").disabled = true;
-      byId("popdex-agent-save").disabled = true;
-      await refresh();
+      await clearLocalAgent(true);
     } catch (error) {
       if (transactionHash) {
         throw new Error(
@@ -295,7 +324,15 @@
         } else if (button.id === "popdex-agent-save") {
           button.disabled = !generatedPrivateKey || !authorizationVerified;
         } else if (button.id === "popdex-agent-revoke") {
-          button.disabled = !(configuredStatus && configuredStatus.configured && configuredStatus.authorized);
+          button.disabled = !(
+            configuredStatus && configuredStatus.configured && configuredStatus.exists
+          );
+        } else if (button.id === "popdex-agent-clear") {
+          button.disabled = !(
+            configuredStatus &&
+            configuredStatus.configured &&
+            configuredStatus.exists === false
+          );
         }
       }
     };
@@ -308,6 +345,7 @@
     ["popdex-agent-save", persistAgent],
     ["popdex-agent-refresh", refresh],
     ["popdex-agent-revoke", revokeAgent],
+    ["popdex-agent-clear", clearLocalAgent],
   ];
   for (const [id, action] of actions) {
     const button = byId(id);

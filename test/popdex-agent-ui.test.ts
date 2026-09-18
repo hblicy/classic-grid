@@ -16,6 +16,7 @@ test("Dashboard includes local ethers and the complete Agent controls", () => {
     "popdex-agent-save",
     "popdex-agent-refresh",
     "popdex-agent-revoke",
+    "popdex-agent-clear",
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
@@ -29,4 +30,7 @@ test("Agent browser code keeps secrets in memory and protects mutations", () => 
   assert.match(script, /X-Grid-Request/);
   assert.doesNotMatch(script, /localStorage|sessionStorage|document\.cookie/);
   assert.doesNotMatch(script, /URLSearchParams.*private|location\.(?:search|hash).*private/i);
+  assert.match(script, /async function clearLocalAgent/);
+  assert.match(script, /status\.exists\s*===\s*false/);
+  assert.match(script, /configuredStatus\.exists/);
 });
