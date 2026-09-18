@@ -17,21 +17,32 @@ class MemoryFs {
   failWrite = false;
   writes: Array<{ content: string; mode?: number }> = [];
   chmods: number[] = [];
+  files = new Map<string, string>();
 
-  existsSync(): boolean {
-    return this.exists;
+  existsSync(file: string): boolean {
+    return file === "C:/app/.env" ? this.exists : this.files.has(file);
   }
   readFileSync(): string {
     return this.content;
   }
-  writeFileSync(_file: string, content: string, options: { mode?: number }): void {
+  writeFileSync(file: string, content: string, options: { mode?: number }): void {
     if (this.failWrite) throw new Error("disk full");
-    this.content = content;
-    this.exists = true;
+    this.files.set(file, content);
     this.writes.push({ content, mode: options.mode });
   }
   chmodSync(_file: string, mode: number): void {
     this.chmods.push(mode);
+  }
+  renameSync(from: string, to: string): void {
+    const content = this.files.get(from);
+    if (content === undefined) throw new Error(`missing temporary file ${from}`);
+    if (to !== "C:/app/.env") throw new Error(`unexpected target ${to}`);
+    this.content = content;
+    this.exists = true;
+    this.files.delete(from);
+  }
+  unlinkSync(file: string): void {
+    this.files.delete(file);
   }
 }
 
@@ -129,6 +140,27 @@ test("clear preserves an active Agent and removes only a revoked key", async () 
   assert.equal(revoked.processEnv.POPDEX_MAIN_ACCOUNT, MAIN);
   assert.equal(revoked.processEnv.POPDEX_AGENT_PRIVATE_KEY, undefined);
   assert.match(revoked.fsImpl.content, /^# POPDEX_AGENT_PRIVATE_KEY=$/m);
+});
+
+test("clear removes every duplicate Agent key from the env file", async () => {
+  const fsImpl = new MemoryFs();
+  fsImpl.content =
+    `POPDEX_AGENT_PRIVATE_KEY=${AGENT_KEY}\n` +
+    "# POPDEX_AGENT_PRIVATE_KEY=old\n" +
+    "POPDEX_AGENT_PRIVATE_KEY=stale\n";
+  const revoked = service({
+    fsImpl,
+    processEnv: configuredEnv(),
+    info: activeInfo({ exists: false, delegator: null, expiresAt: "0" }),
+  });
+
+  await revoked.service.clear();
+
+  assert.equal(
+    (fsImpl.content.match(/^# POPDEX_AGENT_PRIVATE_KEY=$/gm) || []).length,
+    1
+  );
+  assert.doesNotMatch(fsImpl.content, /^POPDEX_AGENT_PRIVATE_KEY=/m);
 });
 
 test("status returns public identity without the configured private key", async () => {

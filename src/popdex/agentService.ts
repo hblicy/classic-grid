@@ -39,9 +39,12 @@ function escapeRegExp(value: string): string {
 
 function setEnvLine(content: string, key: string, value: string): string {
   const line = value ? `${key}=${value}` : `# ${key}=`;
-  const pattern = new RegExp(`^\\s*(?:#\\s*)?${escapeRegExp(key)}\\s*=.*$`, "m");
-  if (pattern.test(content)) return content.replace(pattern, line);
-  const prefix = content.trimEnd();
+  const pattern = new RegExp(`^\\s*(?:#\\s*)?${escapeRegExp(key)}\\s*=.*$`);
+  const prefix = content
+    .split(/\r?\n/)
+    .filter((existingLine) => !pattern.test(existingLine))
+    .join("\n")
+    .trimEnd();
   return `${prefix}${prefix ? "\n" : ""}${line}\n`;
 }
 

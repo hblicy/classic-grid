@@ -9,7 +9,7 @@
     "status": "node --import tsx src/cli/status.ts",
     "flat": "node --import tsx src/cli/flat.ts",
     "dashboard": "node --import tsx src/cli/dashboard.ts",
-    "test": "node --import tsx test/grid.test.ts && node --test --import tsx test/popdex-agent.test.ts test/popdex-agent-rpc.test.ts test/popdex-agent-service.test.ts test/dashboard-security.test.ts test/popdex-agent-api.test.ts test/popdex-agent-ui.test.ts test/popdex-executor-agent.test.ts test/popdex-docs.test.ts"
+    "test": "node --import tsx test/grid.test.ts && node --test --import tsx test/popdex-agent.test.ts test/popdex-agent-rpc.test.ts test/popdex-agent-service.test.ts test/env-file.test.ts test/dashboard-security.test.ts test/popdex-agent-api.test.ts test/popdex-agent-ui.test.ts test/popdex-executor-agent.test.ts test/popdex-docs.test.ts"
   },
   "engines": {
     "node": ">=20"
