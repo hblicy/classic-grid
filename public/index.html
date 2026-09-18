@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0d1117" />
   <title>网格总看板 · 8088</title>
+  <script src="/vendor/ethers.js?v=6.13.5-umd"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -231,6 +232,22 @@
     .ladder-hint { color: var(--mut); font-size: 11px; margin-top: 4px; }
     .ladder-empty { color: var(--mut); font-size: 12px; padding: 10px 0 2px; }
     .section-title.t-ladder { color: #a371f7; margin-top: 18px; }
+    .agent-card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px; display: grid; gap: 12px;
+    }
+    .agent-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .agent-field { background: var(--panel2); border-radius: 8px; padding: 10px; min-width: 0; }
+    .agent-field b { display: block; color: var(--mut); font-size: 11px; margin-bottom: 4px; }
+    .agent-field span { overflow-wrap: anywhere; word-break: break-all; font-size: 12px; }
+    .agent-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .agent-actions button {
+      border: 1px solid var(--border); background: var(--panel2); color: var(--txt);
+      padding: 9px; border-radius: 8px; cursor: pointer; font-weight: 700;
+    }
+    .agent-actions button:hover { border-color: var(--blue); }
+    .agent-actions button:disabled { opacity: .45; cursor: not-allowed; }
+    .agent-actions .danger { color: #ff7b72; border-color: #f85149; }
     @media (max-width: 900px) {
       .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -251,6 +268,7 @@
       .table th, .table td { padding: 7px 6px; font-size: 11px; }
       .ladder { padding: 10px 10px; }
       .ladder-rail { height: 44px; }
+      .agent-grid, .agent-actions { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
       .kpis { grid-template-columns: 1fr 1fr; }
@@ -316,6 +334,25 @@
     <p class="section-title t-ladder">挂单档位分布</p>
     <p class="meta" style="margin:-6px 0 4px">横轴=价格 · <span style="color:#3fb950">绿线=买单</span> · <span style="color:#f85149">红线=卖单</span> · <span style="color:#ffd666">黄线=当前价 mid</span> · <span style="color:#a371f7">紫线=锚点</span> · 黄块=档距空洞</p>
     <div id="venueLadders" class="ladders"></div>
+
+    <p class="section-title" style="color:#e85d75">PopDEX Agent 钱包</p>
+    <section class="agent-card">
+      <p class="meta">主钱包只负责在浏览器钱包中授权或撤销；应用仅保存可撤销的 Agent 私钥。保存、替换或撤销前请先暂停 PopDEX，完成后重启进程。</p>
+      <div class="agent-grid">
+        <div class="agent-field"><b>授权状态</b><span id="popdex-agent-status">正在读取…</span></div>
+        <div class="agent-field"><b>主账户</b><span id="popdex-agent-main">—</span></div>
+        <div class="agent-field"><b>Agent 地址</b><span id="popdex-agent-address">—</span></div>
+        <div class="agent-field"><b>临时 Agent 私钥</b><span id="popdex-agent-private">尚未生成</span></div>
+      </div>
+      <div class="agent-actions">
+        <button type="button" id="popdex-agent-generate">1. 生成临时 Agent</button>
+        <button type="button" id="popdex-agent-copy" disabled>复制私钥</button>
+        <button type="button" id="popdex-agent-authorize" disabled>2. 主钱包授权</button>
+        <button type="button" id="popdex-agent-save" disabled>3. 验证并保存</button>
+        <button type="button" id="popdex-agent-refresh">刷新链上状态</button>
+        <button type="button" id="popdex-agent-revoke" class="danger" disabled>撤销并清除本地私钥</button>
+      </div>
+    </section>
 
     <p class="section-title t-cal">日历</p>
     <div class="meta" id="calMeta">按日汇总</div>
@@ -733,7 +770,7 @@
       try {
         const r = await fetch(paused ? "/api/pause" : "/api/resume", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Grid-Request": "1" },
           body: JSON.stringify({ reason: "dashboard-ui" }),
         });
         const j = await r.json().catch(() => ({}));
@@ -779,7 +816,7 @@
       try {
         const r = await fetch("/api/venue-control", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Grid-Request": "1" },
           body: JSON.stringify({ venue, action: act }),
         });
         const j = await r.json().catch(() => ({}));
@@ -795,5 +832,6 @@
     poll();
     setInterval(poll, 3000);
   </script>
+  <script src="/popdex-agent.js"></script>
 </body>
 </html>

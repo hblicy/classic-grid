@@ -8,7 +8,7 @@
 适配器：**Extended · RISEx · Decibel · N1 · Phoenix · Phoenix2 · Nado · PopDEX**
 
 > 开源模板，**不含私钥 / API Key / Telegram Token / 服务器地址 / 账本文件**。
-> 生产运行只需要：`cp .env.example .env`，填上你的密钥，其余代码零改动。
+> 生产运行只需要：`cp .env.example .env`，填上所需凭据，其余代码零改动。PopDEX 使用独立 Agent，主钱包私钥不得填入本项目。
 
 ---
 
@@ -81,6 +81,18 @@ cp .env.example .env
 - 各所的 API / 私钥 / keypair 路径（`secrets/*.key`、`secrets/*.json`，已在 `.gitignore`）
 - 默认 `DRY_RUN=1`（模拟，只读看板，不下单）
 - 实盘必须**同时**满足：`DRY_RUN=0` 且 `LIVE_CONFIRM=YES`
+
+#### PopDEX Agent 配置
+
+PopDEX 不再接受主钱包私钥或旧的 `POPDEX_PRIVATE_KEY` / `POPDEX_KEY_PATH`。交易读取主账户，签名使用权限可撤销的独立 Agent：
+
+1. 启动看板，在「PopDEX Agent 钱包」中生成 Agent；生成的私钥只保存在当前页面内存中。
+2. 用主钱包连接钱包插件，完成主钱包授权；后端会做链上回验，确认 Agent 与主账户的授权关系。
+3. 点击保存，将主账户公开地址与 Agent 私钥写入本机 `.env`：`POPDEX_MAIN_ACCOUNT`、`POPDEX_AGENT_PRIVATE_KEY`。主钱包私钥不得保存到项目或服务器。
+4. 重启进程，使运行时加载新配置；启动时会再次检查链上授权状态。
+5. 撤销或替换 Agent 前先暂停 PopDEX 交易。用主钱包提交撤销，等待链上确认后再在页面清除本地 Agent 配置并重启。
+
+看板默认只监听 `127.0.0.1`。如需远程监听，必须设置至少 16 个字符的 `DASHBOARD_TOKEN`；远程访问还应按 [`SECURITY.md`](./SECURITY.md) 配置安全通道。
 
 ### 3. 先空转一轮（强烈建议）
 

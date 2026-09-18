@@ -23,9 +23,20 @@ import {
   allVenueControl,
   enqueueVenueCommand,
   getPendingCommands,
+  isVenuePaused,
   loadVenueControl,
   type VenueControlAction,
 } from "./venueControl.js";
+import {
+  HttpRequestError,
+  authorizeRequest,
+  dashboardSecurityConfig,
+  readJsonBody,
+  sendUnauthorized,
+  validateMutationRequest,
+} from "./dashboardSecurity.js";
+import { PopdexAgentService } from "./popdex/agentService.js";
+import { PopdexAgentRpc } from "./popdex/agentRpc.js";
 
 export type DashboardVenueRow = {
   venue: string;
@@ -70,6 +81,14 @@ export type DashboardSnapshot = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
+const ETHERS_JS_FILE = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "ethers",
+  "dist",
+  "ethers.umd.min.js"
+);
 
 loadBotPauseState();
 loadVenueControl();
@@ -177,312 +196,330 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
   persistStatus();
 }
 
-export function startDashboardServer(port: number): http.Server | null {
-  if (!(port > 0)) return null;
-  const server = http.createServer((req, res) => {
-    const url = req.url?.split("?")[0] || "/";
-    if (url === "/api/snapshot" || url === "/api/status" || url === "/api/overview") {
-      syncPauseIntoSnapshot();
-      const body = {
-        ...snapshot,
-        ledger: ledgerPublicView(loadLedger()),
-        venueControl: {
-          venues: allVenueControl(),
-          pending: getPendingCommands(),
-        },
-      };
-      res.writeHead(200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      });
-      res.end(JSON.stringify(body));
-      return;
-    }
-    if (url === "/api/meta") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ authRequired: false, port }));
-      return;
-    }
-    if (
-      (url === "/api/pause" || url === "/api/resume" || url === "/api/bot-pause") &&
-      req.method === "POST"
-    ) {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        let reason: string | undefined;
-        try {
-          const raw = Buffer.concat(chunks).toString("utf8");
-          if (raw) {
-            const j = JSON.parse(raw);
-            if (j?.reason) reason = String(j.reason);
-            if (url === "/api/bot-pause" && typeof j?.paused === "boolean") {
-              const st = applyBotPause(j.paused, reason || "dashboard");
-              res.writeHead(200, {
-                "Content-Type": "application/json; charset=utf-8",
-                "Cache-Control": "no-store",
-              });
-              res.end(JSON.stringify({ ok: true, ...st }));
-              return;
-            }
-          }
-        } catch {
-          /* ignore body */
-        }
-        const wantPause = url === "/api/pause";
-        const st = applyBotPause(wantPause, reason || "dashboard");
-        res.writeHead(200, {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "no-store",
-        });
-        res.end(JSON.stringify({ ok: true, ...st }));
-      });
-      return;
-    }
-    if (url === "/api/venue-control" && req.method === "GET") {
-      const body = {
-        venues: allVenueControl(),
-        pending: getPendingCommands(),
-      };
-      res.writeHead(200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      });
-      res.end(JSON.stringify(body));
-      return;
-    }
-    if (url === "/api/venue-control" && req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-          const j = JSON.parse(raw);
-          const venue = String(j?.venue || "").trim();
-          const action = String(j?.action || "").trim() as VenueControlAction;
-          const actions: VenueControlAction[] = [
-            "cancel-sells",
-            "cancel-buys",
-            "close-half",
-            "pause",
-            "resume",
-            "flat-reseed",
-          ];
-          const validVenues = [
-            "extended",
-            "risex",
-            "decibel",
-            "n1",
-            "phoenix",
-            "phoenix2",
-            "nado",
-            "popdex",
-          ];
-          if (!venue || !validVenues.includes(venue) || !actions.includes(action)) {
-            res.writeHead(400, {
-              "Content-Type": "application/json; charset=utf-8",
-            });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: `非法参数 venue=${venue} action=${action}`,
-              })
-            );
-            return;
-          }
-          const cmd = enqueueVenueCommand(venue as VenueId, action);
-          res.writeHead(200, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          res.end(JSON.stringify({ ok: true, command: cmd }));
-        } catch (e: any) {
-          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: String(e?.message || e).slice(0, 240),
-            })
-          );
-        }
-      });
-      return;
-    }
-    if (url === "/api/capital-flow" && req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-          const j = JSON.parse(raw);
-          const items = Array.isArray(j?.flows)
-            ? j.flows
-            : [
-                {
-                  venue: j?.venue,
-                  amount:
-                    j?.amount != null
-                      ? Number(j.amount)
-                      : j?.withdraw != null
-                        ? -Math.abs(Number(j.withdraw))
-                        : j?.deposit != null
-                          ? Math.abs(Number(j.deposit))
-                          : NaN,
-                  note: j?.note,
-                },
-              ];
-          const applied = [];
-          for (const it of items) {
-            const venue = String(it?.venue || "manual");
-            let amount = Number(it?.amount);
-            if (!Number.isFinite(amount) && it?.withdraw != null) {
-              amount = -Math.abs(Number(it.withdraw));
-            }
-            if (!Number.isFinite(amount) && it?.deposit != null) {
-              amount = Math.abs(Number(it.deposit));
-            }
-            const st = applyCapitalFlow({
-              venue,
-              amount,
-              note: it?.note ? String(it.note) : undefined,
-            });
-            applied.push({
-              venue,
-              amount,
-              dayProfit: st.calendar[0]?.dayProfit,
-              dayOpenEquity: st.dayOpenEquity,
-            });
-          }
-          const view = ledgerPublicView();
-          // 刷新看板里的 ledger 视图
-          snapshot = {
-            ...snapshot,
-            ledger: view,
-            updatedAt: new Date().toISOString(),
-          };
-          persistStatus();
-          res.writeHead(200, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          res.end(JSON.stringify({ ok: true, applied, ledger: view }));
-        } catch (e: any) {
-          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: String(e?.message || e).slice(0, 240),
-            })
-          );
-        }
-      });
-      return;
-    }
-    if (url === "/api/ledger/official-volume" && req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-          const j = JSON.parse(raw);
-          const items = Array.isArray(j?.days)
-            ? j.days
-            : [{ day: j?.day, volume: j?.volume }];
-          const applied = [];
-          for (const it of items) {
-            const day = String(it?.day || "");
-            const volume = Number(it?.volume);
-            const st = patchOfficialVolumeForDay(day, volume);
-            const row = st.calendar.find((d) => d.day === day);
-            applied.push({ day, volume: row?.officialVolume ?? volume });
-          }
-          const view = ledgerPublicView();
-          snapshot = {
-            ...snapshot,
-            ledger: view,
-            updatedAt: new Date().toISOString(),
-          };
-          persistStatus();
-          res.writeHead(200, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          res.end(JSON.stringify({ ok: true, applied, ledger: view }));
-        } catch (e: any) {
-          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: String(e?.message || e).slice(0, 240),
-            })
-          );
-        }
-      });
-      return;
-    }
-    if (url === "/api/ledger/calendar-trim" && req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-          const j = JSON.parse(raw);
-          const from = String(j?.from || j?.keepFrom || "");
-          const st = trimLedgerCalendar(from);
-          const view = ledgerPublicView(st);
-          snapshot = {
-            ...snapshot,
-            ledger: view,
-            updatedAt: new Date().toISOString(),
-          };
-          persistStatus();
-          res.writeHead(200, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          res.end(
-            JSON.stringify({
-              ok: true,
-              from,
-              days: view.calendar.map((d) => d.day),
-              ledger: view,
-            })
-          );
-        } catch (e: any) {
-          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: String(e?.message || e).slice(0, 240),
-            })
-          );
-        }
-      });
-      return;
-    }
-    if (url === "/" || url === "/index.html") {
-      const htmlPath = path.join(PUBLIC_DIR, "index.html");
-      if (!fs.existsSync(htmlPath)) {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("public/index.html missing");
+export type DashboardServerOptions = {
+  env?: NodeJS.ProcessEnv;
+  agentService?: Pick<
+    PopdexAgentService,
+    | "status"
+    | "prepareApproval"
+    | "verifyAuthorization"
+    | "save"
+    | "prepareRevoke"
+    | "clear"
+  >;
+};
+
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(JSON.stringify(body));
+}
+
+export function startDashboardServer(
+  port: number,
+  options: DashboardServerOptions = {}
+): http.Server | null {
+  if (!(port >= 0)) return null;
+  const env = options.env ?? process.env;
+  const security = dashboardSecurityConfig(env);
+  const agentService =
+    options.agentService ??
+    new PopdexAgentService({
+      rpcClient: new PopdexAgentRpc(),
+      envFile: path.resolve(process.cwd(), ".env"),
+      processEnv: env,
+      canMutate: () => {
+        const popdexVisible = snapshot.venues.some((venue) => venue.venue === "popdex");
+        if (snapshot.dryRun || !popdexVisible || snapshot.paused) return true;
+        return isVenuePaused("popdex");
+      },
+    });
+
+  const server = http.createServer(async (req, res) => {
+    const sensitiveValues: string[] = [];
+    try {
+      if (!authorizeRequest(req, security)) {
+        sendUnauthorized(res);
         return;
       }
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        Pragma: "no-cache",
-      });
-      res.end(fs.readFileSync(htmlPath));
-      return;
+      if (req.method === "POST") validateMutationRequest(req);
+
+      const url = req.url?.split("?")[0] || "/";
+      if (url === "/api/snapshot" || url === "/api/status" || url === "/api/overview") {
+        syncPauseIntoSnapshot();
+        sendJson(res, 200, {
+          ...snapshot,
+          ledger: ledgerPublicView(loadLedger()),
+          venueControl: {
+            venues: allVenueControl(),
+            pending: getPendingCommands(),
+          },
+        });
+        return;
+      }
+      if (url === "/api/meta") {
+        sendJson(res, 200, {
+          authRequired: security.authRequired,
+          port,
+          bindHost: security.bindHost,
+        });
+        return;
+      }
+      if (url === "/api/popdex/agent/status" && req.method === "GET") {
+        sendJson(res, 200, await agentService.status());
+        return;
+      }
+      if (url === "/api/popdex/agent/prepare-approval" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.prepareApproval({
+            agentAddress: String(body.agentAddress || ""),
+            delegator: String(body.delegator || ""),
+            hostname: String(body.hostname || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/verify" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.verifyAuthorization({
+            mainAccount: String(body.mainAccount || ""),
+            agentAddress: String(body.agentAddress || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/save" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        const agentPrivateKey = String(body.agentPrivateKey || "");
+        if (agentPrivateKey) sensitiveValues.push(agentPrivateKey);
+        sendJson(
+          res,
+          200,
+          await agentService.save({
+            mainAccount: String(body.mainAccount || ""),
+            agentPrivateKey,
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/prepare-revoke" && req.method === "POST") {
+        const body = await readJsonBody(req, 4096);
+        sendJson(
+          res,
+          200,
+          await agentService.prepareRevoke({
+            mainAccount: String(body.mainAccount || ""),
+            agentAddress: String(body.agentAddress || ""),
+          })
+        );
+        return;
+      }
+      if (url === "/api/popdex/agent/clear" && req.method === "POST") {
+        await readJsonBody(req, 4096);
+        sendJson(res, 200, await agentService.clear());
+        return;
+      }
+      if (
+        (url === "/api/pause" || url === "/api/resume" || url === "/api/bot-pause") &&
+        req.method === "POST"
+      ) {
+        const body = await readJsonBody(req, 16_384);
+        const reason = body.reason ? String(body.reason) : undefined;
+        const paused =
+          url === "/api/bot-pause" && typeof body.paused === "boolean"
+            ? body.paused
+            : url === "/api/pause";
+        const state = applyBotPause(paused, reason || "dashboard");
+        sendJson(res, 200, { ok: true, ...state });
+        return;
+      }
+      if (url === "/api/venue-control" && req.method === "GET") {
+        sendJson(res, 200, {
+          venues: allVenueControl(),
+          pending: getPendingCommands(),
+        });
+        return;
+      }
+      if (url === "/api/venue-control" && req.method === "POST") {
+        const body = await readJsonBody(req, 16_384);
+        const venue = String(body.venue || "").trim();
+        const action = String(body.action || "").trim() as VenueControlAction;
+        const actions: VenueControlAction[] = [
+          "cancel-sells",
+          "cancel-buys",
+          "close-half",
+          "pause",
+          "resume",
+          "flat-reseed",
+        ];
+        const validVenues = [
+          "extended",
+          "risex",
+          "decibel",
+          "n1",
+          "phoenix",
+          "phoenix2",
+          "nado",
+          "popdex",
+        ];
+        if (!venue || !validVenues.includes(venue) || !actions.includes(action)) {
+          throw new HttpRequestError(400, `非法参数 venue=${venue} action=${action}`);
+        }
+        const command = enqueueVenueCommand(venue as VenueId, action);
+        sendJson(res, 200, { ok: true, command });
+        return;
+      }
+      if (url === "/api/capital-flow" && req.method === "POST") {
+        const body = await readJsonBody(req, 65_536);
+        const items = Array.isArray(body.flows)
+          ? body.flows
+          : [
+              {
+                venue: body.venue,
+                amount:
+                  body.amount != null
+                    ? Number(body.amount)
+                    : body.withdraw != null
+                      ? -Math.abs(Number(body.withdraw))
+                      : body.deposit != null
+                        ? Math.abs(Number(body.deposit))
+                        : NaN,
+                note: body.note,
+              },
+            ];
+        const applied = [];
+        for (const item of items) {
+          const entry = item as Record<string, unknown>;
+          const venue = String(entry.venue || "manual");
+          let amount = Number(entry.amount);
+          if (!Number.isFinite(amount) && entry.withdraw != null) {
+            amount = -Math.abs(Number(entry.withdraw));
+          }
+          if (!Number.isFinite(amount) && entry.deposit != null) {
+            amount = Math.abs(Number(entry.deposit));
+          }
+          const state = applyCapitalFlow({
+            venue,
+            amount,
+            note: entry.note ? String(entry.note) : undefined,
+          });
+          applied.push({
+            venue,
+            amount,
+            dayProfit: state.calendar[0]?.dayProfit,
+            dayOpenEquity: state.dayOpenEquity,
+          });
+        }
+        const ledger = ledgerPublicView();
+        snapshot = { ...snapshot, ledger, updatedAt: new Date().toISOString() };
+        persistStatus();
+        sendJson(res, 200, { ok: true, applied, ledger });
+        return;
+      }
+      if (url === "/api/ledger/official-volume" && req.method === "POST") {
+        const body = await readJsonBody(req, 65_536);
+        const items = Array.isArray(body.days)
+          ? body.days
+          : [{ day: body.day, volume: body.volume }];
+        const applied = [];
+        for (const item of items) {
+          const entry = item as Record<string, unknown>;
+          const day = String(entry.day || "");
+          const volume = Number(entry.volume);
+          const state = patchOfficialVolumeForDay(day, volume);
+          const row = state.calendar.find((value) => value.day === day);
+          applied.push({ day, volume: row?.officialVolume ?? volume });
+        }
+        const ledger = ledgerPublicView();
+        snapshot = { ...snapshot, ledger, updatedAt: new Date().toISOString() };
+        persistStatus();
+        sendJson(res, 200, { ok: true, applied, ledger });
+        return;
+      }
+      if (url === "/api/ledger/calendar-trim" && req.method === "POST") {
+        const body = await readJsonBody(req, 16_384);
+        const from = String(body.from || body.keepFrom || "");
+        const state = trimLedgerCalendar(from);
+        const ledger = ledgerPublicView(state);
+        snapshot = { ...snapshot, ledger, updatedAt: new Date().toISOString() };
+        persistStatus();
+        sendJson(res, 200, {
+          ok: true,
+          from,
+          days: ledger.calendar.map((day) => day.day),
+          ledger,
+        });
+        return;
+      }
+      if (url === "/vendor/ethers.js") {
+        if (!fs.existsSync(ETHERS_JS_FILE)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("ethers browser bundle missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "public, max-age=31536000, immutable",
+        });
+        fs.createReadStream(ETHERS_JS_FILE).pipe(res);
+        return;
+      }
+      if (url === "/popdex-agent.js") {
+        const scriptPath = path.join(PUBLIC_DIR, "popdex-agent.js");
+        if (!fs.existsSync(scriptPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("public/popdex-agent.js missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(fs.readFileSync(scriptPath));
+        return;
+      }
+      if (url === "/" || url === "/index.html") {
+        const htmlPath = path.join(PUBLIC_DIR, "index.html");
+        if (!fs.existsSync(htmlPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("public/index.html missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          Pragma: "no-cache",
+        });
+        res.end(fs.readFileSync(htmlPath));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    } catch (error) {
+      const status = error instanceof HttpRequestError ? error.statusCode : 400;
+      let message = String(error instanceof Error ? error.message : error);
+      for (const value of sensitiveValues) message = message.replaceAll(value, "[REDACTED]");
+      message = message.slice(0, 240);
+      sendJson(res, status, { ok: false, error: message });
     }
-    res.writeHead(404, { "Content-Type": "text/plain" });
-    res.end("not found");
   });
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`[dashboard] http://0.0.0.0:${port}/  api=/api/snapshot`);
+  server.listen(port, security.bindHost, () => {
+    const address = server.address();
+    const actualPort = typeof address === "object" && address ? address.port : port;
+    console.log(
+      `[dashboard] http://${security.bindHost}:${actualPort}/  api=/api/snapshot auth=${security.authRequired ? "basic" : "loopback"}`
+    );
   });
-  server.on("error", (e: NodeJS.ErrnoException) => {
-    console.error(`[dashboard] listen failed: ${e.message}`);
+  server.on("error", (error: NodeJS.ErrnoException) => {
+    console.error(`[dashboard] listen failed: ${error.message}`);
   });
   return server;
 }
