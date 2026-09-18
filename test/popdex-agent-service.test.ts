@@ -134,6 +134,7 @@ test("clear preserves an active Agent and removes only a revoked key", async () 
 test("status returns public identity without the configured private key", async () => {
   const ctx = service({ processEnv: configuredEnv() });
   const status = await ctx.service.status();
+  assert.equal(status.exists, true);
   assert.equal(status.agentAddress, AGENT);
   assert.equal(status.mainAccount, MAIN);
   assert.doesNotMatch(JSON.stringify(status), new RegExp(AGENT_KEY));
@@ -173,6 +174,14 @@ test("write failure leaves runtime credentials unchanged", async () => {
 test("mutation guard blocks save, revoke preparation and clear", async () => {
   const ctx = service({ processEnv: configuredEnv(), canMutate: () => false });
   await assert.rejects(
+    ctx.service.prepareApproval({
+      agentAddress: AGENT,
+      delegator: MAIN,
+      hostname: "grid.example",
+    }),
+    /请先暂停/
+  );
+  await assert.rejects(
     ctx.service.save({ mainAccount: MAIN, agentPrivateKey: AGENT_KEY }),
     /请先暂停/
   );
@@ -181,6 +190,26 @@ test("mutation guard blocks save, revoke preparation and clear", async () => {
     /请先暂停/
   );
   await assert.rejects(ctx.service.clear(), /请先暂停/);
+  assert.deepEqual(ctx.calls, []);
+});
+
+test("revoke allows expired and global Agents owned by the main account", async () => {
+  for (const info of [activeInfo({ isExpired: true }), activeInfo({ isGlobal: true })]) {
+    const ctx = service({ info });
+    const prepared = await ctx.service.prepareRevoke({
+      mainAccount: MAIN,
+      agentAddress: AGENT,
+    });
+    assert.equal(prepared.from, MAIN);
+  }
+});
+
+test("revoke rejects a mismatched delegator", async () => {
+  const ctx = service({ info: activeInfo({ delegator: OTHER_MAIN }) });
+  await assert.rejects(
+    ctx.service.prepareRevoke({ mainAccount: MAIN, agentAddress: AGENT }),
+    /delegator/
+  );
 });
 
 test("approval preparation selects a unique same-name replacement", async () => {

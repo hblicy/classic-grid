@@ -26,6 +26,7 @@ export type PublicAgentStatus = {
   configured: boolean;
   mainAccount: string | null;
   agentAddress?: string;
+  exists?: boolean;
   authorized?: boolean;
   reason?: string | null;
   expiresAt?: string;
@@ -120,6 +121,7 @@ export class PopdexAgentService {
       configured: true,
       mainAccount: main,
       agentAddress: agent,
+      exists: info.exists,
       authorized: reason === null,
       reason,
       expiresAt: info.expiresAt,
@@ -160,6 +162,7 @@ export class PopdexAgentService {
     delegator: string;
     hostname: string;
   }): Promise<PreparedAgentTransaction & { from: string }> {
+    this.assertMutationAllowed();
     const main = strictAddress(input.delegator, "delegator");
     await this.rpcClient.verifyChain();
     const existingAgents = await this.rpcClient.getAgents(main);
@@ -195,10 +198,21 @@ export class PopdexAgentService {
     agentAddress: string;
   }): Promise<PreparedAgentTransaction & { from: string }> {
     this.assertMutationAllowed();
-    const status = await this.verifyAuthorization(input);
+    const main = strictAddress(input.mainAccount, "mainAccount");
+    const agent = strictAddress(input.agentAddress, "agentAddress");
+    if (main === agent) throw new Error("PopDEX Agent 地址与主账户不能相同。");
+    const status = await this.inspectAuthorization(main, agent);
+    if (!status.info.exists) {
+      throw new Error("PopDEX Agent 链上不存在，无需撤销。");
+    }
+    if (status.info.delegator !== main) {
+      throw new Error(
+        `PopDEX Agent delegator=${status.info.delegator || "null"}，预期 ${main}。`
+      );
+    }
     return {
-      from: status.mainAccount!,
-      ...prepareAgentRevocation(status.agentAddress!),
+      from: main,
+      ...prepareAgentRevocation(agent),
     };
   }
 
