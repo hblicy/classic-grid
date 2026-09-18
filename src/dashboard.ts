@@ -261,7 +261,7 @@ export function startDashboardServer(
         sendUnauthorized(res);
         return;
       }
-      if (req.method === "POST") validateMutationRequest(req);
+      if (req.method === "POST") validateMutationRequest(req, security);
 
       const url = req.url?.split("?")[0] || "/";
       if (url === "/api/snapshot" || url === "/api/status" || url === "/api/overview") {

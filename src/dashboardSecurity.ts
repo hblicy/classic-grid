@@ -84,7 +84,10 @@ function singleHeader(req: IncomingMessage, name: string): string | undefined {
   return value;
 }
 
-export function validateMutationRequest(req: IncomingMessage): void {
+export function validateMutationRequest(
+  req: IncomingMessage,
+  config: DashboardSecurityConfig
+): void {
   const contentType = singleHeader(req, "content-type") || "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
     throw new HttpRequestError(415, "Content-Type 必须是 application/json");
@@ -108,6 +111,12 @@ export function validateMutationRequest(req: IncomingMessage): void {
     origin.host.toLowerCase() !== host.toLowerCase()
   ) {
     throw new HttpRequestError(403, "Origin 与当前 Dashboard 不同源");
+  }
+  if (
+    !config.authRequired &&
+    !new Set(["localhost", "127.0.0.1", "[::1]"]).has(origin.hostname.toLowerCase())
+  ) {
+    throw new HttpRequestError(403, "无 Token 模式只允许 loopback Host");
   }
 }
 
