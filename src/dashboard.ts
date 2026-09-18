@@ -489,6 +489,21 @@ export function startDashboardServer(
         fs.createReadStream(ETHERS_JS_FILE).pipe(res);
         return;
       }
+      if (url === "/dashboard-safety.js") {
+        const scriptPath = path.join(PUBLIC_DIR, "dashboard-safety.js");
+        if (!fs.existsSync(scriptPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("public/dashboard-safety.js missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(fs.readFileSync(scriptPath));
+        return;
+      }
       if (url === "/popdex-agent.js") {
         const scriptPath = path.join(PUBLIC_DIR, "popdex-agent.js");
         if (!fs.existsSync(scriptPath)) {

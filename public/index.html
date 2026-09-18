@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#0d1117" />
   <title>网格总看板 · 8088</title>
   <script src="/vendor/ethers.js?v=6.13.5-umd"></script>
+  <script src="/dashboard-safety.js"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -656,7 +657,7 @@
           <td>${volOk ? usdShort(o.volume) : "-"}</td>
           <td>${n(v.gridCount)}</td>
           <td class="${v.unrealizedPnl != null && Number.isFinite(n(v.unrealizedPnl)) ? cls(v.unrealizedPnl) : ""}">${v.unrealizedPnl != null && Number.isFinite(n(v.unrealizedPnl)) ? signed(v.unrealizedPnl) : "-"}</td>
-          <td class="meta" style="white-space:normal;max-width:200px">${v.lastError || (paused ? "已暂停（可手动撤单/平仓）" : (v.seeded ? "运行中" : "待铺"))}</td>
+          <td class="meta" style="white-space:normal;max-width:200px">${v.lastError ? DashboardSafety.escapeHtml(v.lastError) : (paused ? "已暂停（可手动撤单/平仓）" : (v.seeded ? "运行中" : "待铺"))}</td>
           <td>${vcBtns}</td>
         </tr>`;
       }).join("") + (() => {
