@@ -49,7 +49,7 @@ Dashboard 中来自 snapshot 的 `lastError` 必须先经过统一 HTML 转义�
 
 - `from` 等于当前连接主账户；`chainId` 为 `0x888`。
 - `to` 等于固定 Account precompile。
-- `value`、`gasPrice` 为零，交易类型为 legacy，gas 为预期固定上限。
+- `value`、`gas`、`gasPrice` 为协议准备器返回的固定零值，交易类型为 legacy。
 - 用本地 ethers ABI 解码 `data`，只接受 `approveAgent`、`replaceAgent`、`revokeAgent`。
 - approve/replace 的新 Agent、delegator、hostname 派生 name 与当前页面意图一致；有效期和初始 nonce 必须为合理整数并处于服务端允许的当前时间窗口。
 - revoke 的目标 Agent 必须等于当前状态中的 Agent。
