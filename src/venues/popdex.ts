@@ -226,6 +226,7 @@ export type PopdexExecutorDeps = {
   createWallet?: (account: PrivateKeyAccount) => WalletClientLike;
   createPublic?: () => PublicClientLike;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 };
 
 export class PopdexExecutor implements VenueExecutor {
@@ -237,6 +238,8 @@ export class PopdexExecutor implements VenueExecutor {
   private readonly createWallet: (account: PrivateKeyAccount) => WalletClientLike;
   private readonly createPublic: () => PublicClientLike;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => number;
+  private lastNonce = -1;
   private agentAccount: PrivateKeyAccount | null = null;
   private mainAccount: Address | null = null;
   private symbol = DEFAULT_SYMBOL;
@@ -268,6 +271,20 @@ export class PopdexExecutor implements VenueExecutor {
       deps.createPublic ??
       (() => createPublicClient({ chain: popdexChain, transport }) as unknown as PublicClientLike);
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.now = deps.now ?? Date.now;
+  }
+
+  private nextAgentNonce(): number {
+    const wallClock = this.now();
+    if (!Number.isSafeInteger(wallClock) || wallClock < 0) {
+      throw new Error("PopDEX Agent nonce 时钟无效。");
+    }
+    const nonce = Math.max(wallClock, this.lastNonce + 1);
+    if (!Number.isSafeInteger(nonce)) {
+      throw new Error("PopDEX Agent nonce 超出安全整数范围。");
+    }
+    this.lastNonce = nonce;
+    return nonce;
   }
 
   private roundPrice(px: number): number {
@@ -438,6 +455,7 @@ export class PopdexExecutor implements VenueExecutor {
       value: 0n,
       gas,
       gasPrice: 0n,
+      nonce: this.nextAgentNonce(),
     });
     for (let i = 0; i < 30; i++) {
       await this.sleep(400);
