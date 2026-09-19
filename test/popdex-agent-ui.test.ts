@@ -16,10 +16,26 @@ type FakeElement = {
   addEventListener: (name: string, listener: () => Promise<void>) => void;
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function loadAgentPage(
   options: {
     status?: Record<string, unknown>;
     confirmations?: boolean[];
+    waitForTransaction?: () => Promise<{ status: number }>;
+    verifyError?: Error;
+    saveAgent?: () => Promise<unknown>;
+    sendError?: Error;
+    onTransactionSubmitted?: () => void;
+    onSaveStarted?: () => void;
   } = {}
 ) {
   const ids = [
@@ -94,7 +110,15 @@ async function loadAgentPage(
       }
       if (url === "/api/popdex/agent/prepare-approval") return jsonResponse({});
       if (url === "/api/popdex/agent/prepare-revoke") return jsonResponse({});
-      if (url === "/api/popdex/agent/verify") return jsonResponse({ verified: true });
+      if (url === "/api/popdex/agent/verify") {
+        if (options.verifyError) throw options.verifyError;
+        return jsonResponse({ verified: true });
+      }
+      if (url === "/api/popdex/agent/save") {
+        options.onSaveStarted?.();
+        const saved = options.saveAgent ? await options.saveAgent() : { saved: true };
+        return jsonResponse(saved);
+      }
       throw new Error(`unexpected fetch ${url}`);
     },
     ethers: {
@@ -102,7 +126,9 @@ async function loadAgentPage(
       getAddress: (value: string) => value,
       BrowserProvider: class {
         async waitForTransaction() {
-          return { status: 1 };
+          return options.waitForTransaction
+            ? options.waitForTransaction()
+            : { status: 1 };
         }
       },
     },
@@ -124,7 +150,9 @@ async function loadAgentPage(
           }
           if (method === "eth_chainId") return "0x888";
           if (method === "eth_sendTransaction") {
+            if (options.sendError) throw options.sendError;
             configuredStatus = { ...configuredStatus, exists: false, authorized: false };
+            options.onTransactionSubmitted?.();
             return "0xtx";
           }
           return null;
