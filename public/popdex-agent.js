@@ -87,6 +87,14 @@
   }
 
   function generateAgent() {
+    if (generatedPrivateKey) {
+      if (authorizationVerified) {
+        throw new Error("当前 Agent 已完成链上授权，请先保存私钥后再生成新的 Agent。");
+      }
+      if (!window.confirm("当前未保存的 Agent 私钥将被永久覆盖，确认重新生成？")) {
+        return;
+      }
+    }
     const wallet = ethers.Wallet.createRandom();
     generatedPrivateKey = wallet.privateKey;
     generatedAgentAddress = wallet.address;

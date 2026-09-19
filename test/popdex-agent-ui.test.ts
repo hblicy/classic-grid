@@ -208,3 +208,29 @@ test("Agent authorization order validates before confirmation and sending", () =
   assert.match(authorize, /checked\.oldAgent/);
   assert.match(authorize, /checked\.newAgent/);
 });
+
+test("authorized unsaved Agent draft cannot be regenerated", async () => {
+  const page = await loadAgentPage();
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  const original = page.elements.get("popdex-agent-private")?.textContent;
+  await page.click("popdex-agent-generate");
+  assert.equal(page.walletCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, original);
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /先保存/);
+});
+
+test("unverified Agent draft is replaced only after confirmation", async () => {
+  const cancelled = await loadAgentPage({ confirmations: [false] });
+  await cancelled.click("popdex-agent-generate");
+  const original = cancelled.elements.get("popdex-agent-private")?.textContent;
+  await cancelled.click("popdex-agent-generate");
+  assert.equal(cancelled.walletCount(), 1);
+  assert.equal(cancelled.elements.get("popdex-agent-private")?.textContent, original);
+
+  const confirmed = await loadAgentPage({ confirmations: [true] });
+  await confirmed.click("popdex-agent-generate");
+  await confirmed.click("popdex-agent-generate");
+  assert.equal(confirmed.walletCount(), 2);
+  assert.equal(confirmed.elements.get("popdex-agent-private")?.textContent, "0xkey2");
+});
