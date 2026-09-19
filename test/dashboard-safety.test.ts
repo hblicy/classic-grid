@@ -171,18 +171,13 @@ test("readAgentAuthorizationIntent rejects ambiguous or malformed wallet state",
   );
 });
 
-test("checkedAgentTransaction accepts exact approve and replace intents", () => {
+test("checkedAgentTransaction accepts only the selector and oldAgent bound to intent", () => {
   const safety = loadDashboardSafety();
-  const intent = {
-    kind: "authorize",
-    agentAddress: AGENT,
-    delegator: MAIN,
-    hostname: "grid.example",
-  };
+  const hostname = "grid.example";
   const approve = prepareAgentAuthorization({
     agentAddress: AGENT,
     delegator: MAIN,
-    hostname: intent.hostname,
+    hostname,
     existingAgents: [],
     nowMs: NOW,
   });
@@ -190,34 +185,73 @@ test("checkedAgentTransaction accepts exact approve and replace intents", () => 
     ethers,
     { from: MAIN, ...approve },
     MAIN,
-    intent,
+    { kind: "approve", agentAddress: AGENT, delegator: MAIN, hostname },
     NOW
   );
-  assert.equal(checkedApprove.to, POPDEX_ACCOUNT_PRECOMPILE);
-  assert.equal(checkedApprove.from, MAIN);
+  assert.equal(checkedApprove.action, "approve");
+  assert.equal(checkedApprove.newAgent, AGENT);
+  assert.equal(checkedApprove.transaction.to, POPDEX_ACCOUNT_PRECOMPILE);
+  assert.equal(checkedApprove.transaction.from, MAIN);
 
   const replace = prepareAgentAuthorization({
     agentAddress: AGENT,
     delegator: MAIN,
-    hostname: intent.hostname,
-    existingAgents: [{ agent: OTHER, name: agentNameBytes32(intent.hostname) }],
+    hostname,
+    existingAgents: [{ agent: OTHER, name: agentNameBytes32(hostname) }],
     nowMs: NOW,
   });
-  assert.doesNotThrow(() =>
-    safety.checkedAgentTransaction(
-      ethers,
-      { from: MAIN, ...replace },
-      MAIN,
-      intent,
-      NOW
-    )
+  const checkedReplace = safety.checkedAgentTransaction(
+    ethers,
+    { from: MAIN, ...replace },
+    MAIN,
+    {
+      kind: "replace",
+      oldAgent: OTHER,
+      agentAddress: AGENT,
+      delegator: MAIN,
+      hostname,
+    },
+    NOW
+  );
+  assert.equal(checkedReplace.action, "replace");
+  assert.equal(checkedReplace.oldAgent, OTHER);
+  assert.equal(checkedReplace.newAgent, AGENT);
+  assert.equal(checkedReplace.transaction.data, replace.data);
+
+  assert.throws(
+    () =>
+      safety.checkedAgentTransaction(
+        ethers,
+        { from: MAIN, ...replace },
+        MAIN,
+        { kind: "approve", agentAddress: AGENT, delegator: MAIN, hostname },
+        NOW
+      ),
+    /交易参数/
+  );
+  assert.throws(
+    () =>
+      safety.checkedAgentTransaction(
+        ethers,
+        { from: MAIN, ...replace },
+        MAIN,
+        {
+          kind: "replace",
+          oldAgent: THIRD,
+          agentAddress: AGENT,
+          delegator: MAIN,
+          hostname,
+        },
+        NOW
+      ),
+    /交易参数/
   );
 });
 
 test("checkedAgentTransaction rejects changed envelope and authorization calldata", () => {
   const safety = loadDashboardSafety();
   const intent = {
-    kind: "authorize",
+    kind: "approve",
     agentAddress: AGENT,
     delegator: MAIN,
     hostname: "grid.example",
@@ -276,15 +310,16 @@ test("checkedAgentTransaction rejects changed envelope and authorization calldat
 test("checkedAgentTransaction binds revoke to the configured Agent", () => {
   const safety = loadDashboardSafety();
   const prepared = prepareAgentRevocation(AGENT);
-  assert.doesNotThrow(() =>
-    safety.checkedAgentTransaction(
-      ethers,
-      { from: MAIN, ...prepared },
-      MAIN,
-      { kind: "revoke", agentAddress: AGENT },
-      NOW
-    )
+  const checked = safety.checkedAgentTransaction(
+    ethers,
+    { from: MAIN, ...prepared },
+    MAIN,
+    { kind: "revoke", agentAddress: AGENT },
+    NOW
   );
+  assert.equal(checked.action, "revoke");
+  assert.equal(checked.agentAddress, AGENT);
+  assert.equal(checked.transaction.data, prepared.data);
   assert.throws(
     () =>
       safety.checkedAgentTransaction(

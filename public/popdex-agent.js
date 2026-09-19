@@ -158,30 +158,32 @@
       throw new Error("请先生成临时 Agent。");
     }
     const mainAccount = await connectWallet();
+    const intent = await DashboardSafety.readAgentAuthorizationIntent(
+      ethers,
+      window.ethereum,
+      mainAccount,
+      generatedAgentAddress,
+      window.location.hostname
+    );
     const prepared = await prepareApproval({
       agentAddress: generatedAgentAddress,
       delegator: mainAccount,
       hostname: window.location.hostname,
     });
-    const action = prepared.action === "replace" ? "替换现有同名 Agent" : "授权新 Agent";
-    if (!window.confirm(`确认使用主钱包 ${mainAccount} ${action}？\nAgent：${generatedAgentAddress}`)) {
-      return;
-    }
+    const checked = DashboardSafety.checkedAgentTransaction(
+      ethers,
+      prepared,
+      mainAccount,
+      intent
+    );
+    const confirmation =
+      checked.action === "replace"
+        ? `确认使用主钱包 ${mainAccount} 替换现有同名 Agent？\n旧 Agent：${checked.oldAgent}\n新 Agent：${checked.newAgent}`
+        : `确认使用主钱包 ${mainAccount} 授权新 Agent？\nAgent：${checked.newAgent}`;
+    if (!window.confirm(confirmation)) return;
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(
-        DashboardSafety.checkedAgentTransaction(
-          ethers,
-          prepared,
-          mainAccount,
-          {
-            kind: "authorize",
-            agentAddress: generatedAgentAddress,
-            delegator: mainAccount,
-            hostname: window.location.hostname,
-          }
-        )
-      );
+      transactionHash = await sendAndConfirm(checked.transaction);
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
       connectedMainAccount = mainAccount;
       authorizationVerified = true;
@@ -282,19 +284,18 @@
       mainAccount,
       agentAddress: status.agentAddress,
     });
+    const checked = DashboardSafety.checkedAgentTransaction(
+      ethers,
+      prepared,
+      mainAccount,
+      { kind: "revoke", agentAddress: status.agentAddress }
+    );
     if (!window.confirm(`确认撤销 Agent ${status.agentAddress}？请确保 PopDEX 已暂停。`)) {
       return;
     }
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(
-        DashboardSafety.checkedAgentTransaction(
-          ethers,
-          prepared,
-          mainAccount,
-          { kind: "revoke", agentAddress: status.agentAddress }
-        )
-      );
+      transactionHash = await sendAndConfirm(checked.transaction);
       await waitUntilRevoked(mainAccount, status.agentAddress);
       await clearLocalAgent(true);
     } catch (error) {

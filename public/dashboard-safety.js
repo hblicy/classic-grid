@@ -152,6 +152,19 @@
     }
   }
 
+  function normalizedTransaction(ethers, prepared, account) {
+    return Object.freeze({
+      from: checkedAddress(ethers, account),
+      to: POPDEX_ACCOUNT_PRECOMPILE,
+      data: prepared.data,
+      value: "0x0",
+      chainId: POPDEX_CHAIN_ID,
+      type: "0x0",
+      gas: "0x0",
+      gasPrice: "0x0",
+    });
+  }
+
   function checkedAgentTransaction(ethers, prepared, account, intent, nowMs = Date.now()) {
     if (
       !ethers ||
@@ -177,66 +190,57 @@
     }
     if (!parsed) invalidTransaction();
 
-    if (intent.kind === "authorize") {
+    const transaction = normalizedTransaction(ethers, prepared, account);
+    if (intent.kind === "approve") {
+      if (parsed.name !== "approveAgent") invalidTransaction();
       const agent = checkedAddress(ethers, intent.agentAddress);
-      if (parsed.name === "approveAgent") {
-        const [actualAgent, delegator, name, expiresAt, initialNonce, isGlobal] = parsed.args;
-        let expectedName;
-        try {
-          if (
-            typeof intent.hostname !== "string" ||
-            intent.hostname.length === 0 ||
-            intent.hostname.length > 253 ||
-            !/^[A-Za-z0-9.-]+$/.test(intent.hostname)
-          ) {
-            invalidTransaction();
-          }
-          expectedName = ethers.encodeBytes32String(`UI_${intent.hostname}`.slice(0, 31));
-        } catch {
-          invalidTransaction();
-        }
-        if (
-          !sameAddress(ethers, actualAgent, agent) ||
-          !sameAddress(ethers, delegator, intent.delegator) ||
-          String(name).toLowerCase() !== String(expectedName).toLowerCase() ||
-          isGlobal !== false
-        ) {
-          invalidTransaction();
-        }
-        checkedTimes(expiresAt, initialNonce, nowMs);
-      } else if (parsed.name === "replaceAgent") {
-        const [oldAgent, newAgent, expiresAt, initialNonce] = parsed.args;
-        if (
-          !sameAddress(ethers, newAgent, agent) ||
-          sameAddress(ethers, oldAgent, agent)
-        ) {
-          invalidTransaction();
-        }
-        checkedTimes(expiresAt, initialNonce, nowMs);
-      } else {
-        invalidTransaction();
-      }
-    } else if (intent.kind === "revoke") {
+      const [actualAgent, delegator, name, expiresAt, initialNonce, isGlobal] = parsed.args;
+      const expectedName = checkedAgentName(ethers, intent.hostname);
       if (
-        parsed.name !== "revokeAgent" ||
-        !sameAddress(ethers, parsed.args[0], intent.agentAddress)
+        !sameAddress(ethers, actualAgent, agent) ||
+        !sameAddress(ethers, delegator, intent.delegator) ||
+        String(name).toLowerCase() !== String(expectedName).toLowerCase() ||
+        isGlobal !== false
       ) {
         invalidTransaction();
       }
-    } else {
-      invalidTransaction();
+      checkedTimes(expiresAt, initialNonce, nowMs);
+      return Object.freeze({ action: "approve", newAgent: agent, transaction });
     }
 
-    return {
-      from: checkedAddress(ethers, account),
-      to: POPDEX_ACCOUNT_PRECOMPILE,
-      data: prepared.data,
-      value: "0x0",
-      chainId: POPDEX_CHAIN_ID,
-      type: "0x0",
-      gas: "0x0",
-      gasPrice: "0x0",
-    };
+    if (intent.kind === "replace") {
+      if (parsed.name !== "replaceAgent") invalidTransaction();
+      const oldAgent = checkedAddress(ethers, intent.oldAgent);
+      const newAgent = checkedAddress(ethers, intent.agentAddress);
+      const [actualOldAgent, actualNewAgent, expiresAt, initialNonce] = parsed.args;
+      if (
+        !sameAddress(ethers, actualOldAgent, oldAgent) ||
+        !sameAddress(ethers, actualNewAgent, newAgent) ||
+        sameAddress(ethers, oldAgent, newAgent)
+      ) {
+        invalidTransaction();
+      }
+      checkedTimes(expiresAt, initialNonce, nowMs);
+      return Object.freeze({
+        action: "replace",
+        oldAgent,
+        newAgent,
+        transaction,
+      });
+    }
+
+    if (intent.kind === "revoke") {
+      const agentAddress = checkedAddress(ethers, intent.agentAddress);
+      if (
+        parsed.name !== "revokeAgent" ||
+        !sameAddress(ethers, parsed.args[0], agentAddress)
+      ) {
+        invalidTransaction();
+      }
+      return Object.freeze({ action: "revoke", agentAddress, transaction });
+    }
+
+    return invalidTransaction();
   }
 
   window.DashboardSafety = Object.freeze({

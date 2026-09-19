@@ -35,3 +35,22 @@ test("Agent browser code keeps secrets in memory and protects mutations", () => 
   assert.match(script, /status\.exists\s*===\s*false/);
   assert.match(script, /configuredStatus\.exists/);
 });
+
+test("Agent authorization order validates before confirmation and sending", () => {
+  const script = fs.readFileSync(scriptPath, "utf8");
+  const authorizeStart = script.indexOf("async function authorizeAgent()");
+  const authorizeEnd = script.indexOf("async function persistAgent()", authorizeStart);
+  const authorize = script.slice(authorizeStart, authorizeEnd);
+  const readIntentAt = authorize.indexOf("readAgentAuthorizationIntent");
+  const checkAt = authorize.indexOf("checkedAgentTransaction");
+  const confirmAt = authorize.indexOf("window.confirm");
+  const sendAt = authorize.indexOf("sendAndConfirm(checked.transaction)");
+  assert.ok(readIntentAt >= 0);
+  assert.ok(readIntentAt < checkAt);
+  assert.ok(checkAt < confirmAt);
+  assert.ok(confirmAt < sendAt);
+  assert.doesNotMatch(authorize, /prepared\.action/);
+  assert.match(authorize, /checked\.action\s*===\s*["']replace["']/);
+  assert.match(authorize, /checked\.oldAgent/);
+  assert.match(authorize, /checked\.newAgent/);
+});
