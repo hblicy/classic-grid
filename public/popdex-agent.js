@@ -6,6 +6,7 @@
   let generatedPrivateKey = null;
   let generatedAgentAddress = null;
   let connectedMainAccount = null;
+  let authorizationSubmitted = false;
   let authorizationVerified = false;
   let configuredStatus = null;
 
@@ -87,10 +88,10 @@
   }
 
   function generateAgent() {
+    if (authorizationSubmitted || authorizationVerified) {
+      throw new Error("当前 Agent 的链上授权交易已提交，请保留并保存该私钥。");
+    }
     if (generatedPrivateKey) {
-      if (authorizationVerified) {
-        throw new Error("当前 Agent 已完成链上授权，请先保存私钥后再生成新的 Agent。");
-      }
       if (!window.confirm("当前未保存的 Agent 私钥将被永久覆盖，确认重新生成？")) {
         return;
       }
@@ -99,6 +100,7 @@
     generatedPrivateKey = wallet.privateKey;
     generatedAgentAddress = wallet.address;
     connectedMainAccount = null;
+    authorizationSubmitted = false;
     authorizationVerified = false;
     byId("popdex-agent-address").textContent = generatedAgentAddress;
     byId("popdex-agent-private").textContent = generatedPrivateKey;
@@ -148,11 +150,12 @@
     return account;
   }
 
-  async function sendAndConfirm(transaction) {
+  async function sendAndConfirm(transaction, onSubmitted = null) {
     const transactionHash = await window.ethereum.request({
       method: "eth_sendTransaction",
       params: [transaction],
     });
+    if (onSubmitted) onSubmitted(transactionHash);
     const provider = new ethers.BrowserProvider(window.ethereum);
     const receipt = await provider.waitForTransaction(transactionHash, 1, RECEIPT_TIMEOUT_MS);
     if (!receipt || Number(receipt.status) !== 1) {
@@ -164,6 +167,9 @@
   async function authorizeAgent() {
     if (!generatedPrivateKey || !generatedAgentAddress) {
       throw new Error("请先生成临时 Agent。");
+    }
+    if (authorizationSubmitted || authorizationVerified) {
+      throw new Error("当前 Agent 的链上授权交易已提交，请保留并保存该私钥。");
     }
     const mainAccount = await connectWallet();
     const intent = await DashboardSafety.readAgentAuthorizationIntent(
@@ -191,7 +197,10 @@
     if (!window.confirm(confirmation)) return;
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(checked.transaction);
+      transactionHash = await sendAndConfirm(checked.transaction, (submittedHash) => {
+        transactionHash = submittedHash;
+        authorizationSubmitted = true;
+      });
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
       connectedMainAccount = mainAccount;
       authorizationVerified = true;
@@ -202,7 +211,7 @@
     } catch (error) {
       if (transactionHash) {
         throw new Error(
-          `链上交易 ${transactionHash} 已确认，但授权回验失败：${errorMessage(error)}。请保留私钥，不要重复授权。`
+          `链上交易 ${transactionHash} 已提交，但授权确认或回验失败：${errorMessage(error)}。请保留私钥，不要重复授权。`
         );
       }
       throw error;
@@ -222,6 +231,7 @@
     });
     generatedPrivateKey = null;
     generatedAgentAddress = null;
+    authorizationSubmitted = false;
     authorizationVerified = false;
     byId("popdex-agent-private").textContent = "私钥已保存；请重启进程后生效";
     byId("popdex-agent-copy").disabled = true;
@@ -253,6 +263,7 @@
     generatedPrivateKey = null;
     generatedAgentAddress = null;
     connectedMainAccount = null;
+    authorizationSubmitted = false;
     authorizationVerified = false;
     byId("popdex-agent-private").textContent = message;
     byId("popdex-agent-copy").disabled = true;

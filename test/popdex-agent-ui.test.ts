@@ -226,7 +226,7 @@ test("Agent authorization order validates before confirmation and sending", () =
   const readIntentAt = authorize.indexOf("readAgentAuthorizationIntent");
   const checkAt = authorize.indexOf("checkedAgentTransaction");
   const confirmAt = authorize.indexOf("window.confirm");
-  const sendAt = authorize.indexOf("sendAndConfirm(checked.transaction)");
+  const sendAt = authorize.indexOf("sendAndConfirm(checked.transaction");
   assert.ok(readIntentAt >= 0);
   assert.ok(readIntentAt < checkAt);
   assert.ok(checkAt < confirmAt);
@@ -245,7 +245,52 @@ test("authorized unsaved Agent draft cannot be regenerated", async () => {
   await page.click("popdex-agent-generate");
   assert.equal(page.walletCount(), 1);
   assert.equal(page.elements.get("popdex-agent-private")?.textContent, original);
-  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /先保存/);
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /保留并保存/);
+});
+
+test("verification failure after transaction submission keeps the draft non-discardable", async () => {
+  const page = await loadAgentPage({
+    confirmations: [true, true],
+    verifyError: new Error("verify failed"),
+  });
+  await page.click("popdex-agent-generate");
+  const privateKey = page.elements.get("popdex-agent-private")?.textContent;
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-generate");
+  assert.equal(page.walletCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+});
+
+test("submitted authorization waiting for a receipt keeps the draft non-discardable", async () => {
+  const receipt = deferred<{ status: number }>();
+  const submitted = deferred<void>();
+  const page = await loadAgentPage({
+    confirmations: [true, true],
+    waitForTransaction: () => receipt.promise,
+    onTransactionSubmitted: () => submitted.resolve(),
+  });
+  await page.click("popdex-agent-generate");
+  const privateKey = page.elements.get("popdex-agent-private")?.textContent;
+  const authorizing = page.click("popdex-agent-authorize");
+  await submitted.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  await page.click("popdex-agent-generate");
+  assert.equal(page.walletCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+  receipt.resolve({ status: 1 });
+  await authorizing;
+});
+
+test("wallet rejection before submission still allows replacing the draft", async () => {
+  const page = await loadAgentPage({
+    confirmations: [true, true],
+    sendError: new Error("wallet rejected"),
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-generate");
+  assert.equal(page.walletCount(), 2);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey2");
 });
 
 test("unverified Agent draft is replaced only after confirmation", async () => {
