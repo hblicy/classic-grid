@@ -19,6 +19,7 @@ const NOW = 1_700_000_000_000;
 const MAIN = "0x1000000000000000000000000000000000000001";
 const AGENT = "0x3000000000000000000000000000000000000003";
 const OTHER = "0x2000000000000000000000000000000000000002";
+const THIRD = "0x4000000000000000000000000000000000000004";
 
 function loadDashboardSafety(): any {
   assert.equal(fs.existsSync(safetyPath), true, "public/dashboard-safety.js must exist");
@@ -27,6 +28,35 @@ function loadDashboardSafety(): any {
     filename: safetyPath,
   });
   return context.window.DashboardSafety;
+}
+
+function walletAgentReader(result: {
+  agents: string[];
+  expiresAts: bigint[];
+  isExpireds: boolean[];
+  names: string[];
+  isGlobals: boolean[];
+}): any {
+  const accountInterface = new ethers.Interface(POPDEX_ACCOUNT_ABI);
+  return {
+    async request(payload: { method: string; params: unknown[] }) {
+      assert.equal(payload.method, "eth_call");
+      const call = payload.params[0] as { to: string; data: string };
+      assert.equal(call.to, POPDEX_ACCOUNT_PRECOMPILE);
+      assert.equal(
+        call.data,
+        accountInterface.encodeFunctionData("getAgents", [MAIN])
+      );
+      assert.equal(payload.params[1], "latest");
+      return accountInterface.encodeFunctionResult("getAgents", [
+        result.agents,
+        result.expiresAts,
+        result.isExpireds,
+        result.names,
+        result.isGlobals,
+      ]);
+    },
+  };
 }
 
 test("escapeHtml renders venue errors as text", () => {
@@ -42,6 +72,103 @@ test("Dashboard loads the safety helper and applies it to lastError", () => {
   assert.ok(html.indexOf("/dashboard-safety.js") < html.indexOf("/popdex-agent.js"));
   assert.match(html, /DashboardSafety\.escapeHtml\(v\.lastError\)/);
   assert.doesNotMatch(html, /\$\{v\.lastError\s*\|\|/);
+});
+
+test("readAgentAuthorizationIntent derives approve and exact replace from wallet RPC", async () => {
+  const safety = loadDashboardSafety();
+  const hostname = "grid.example";
+  const otherName = ethers.encodeBytes32String("UI_other.example");
+  const expectedName = agentNameBytes32(hostname);
+
+  const approve = await safety.readAgentAuthorizationIntent(
+    ethers,
+    walletAgentReader({
+      agents: [OTHER],
+      expiresAts: [1n],
+      isExpireds: [false],
+      names: [otherName],
+      isGlobals: [false],
+    }),
+    MAIN,
+    AGENT,
+    hostname
+  );
+  assert.equal(approve.kind, "approve");
+  assert.equal(approve.agentAddress, AGENT);
+  assert.equal(approve.delegator, MAIN);
+  assert.equal(approve.hostname, hostname);
+
+  const replace = await safety.readAgentAuthorizationIntent(
+    ethers,
+    walletAgentReader({
+      agents: [OTHER],
+      expiresAts: [1n],
+      isExpireds: [false],
+      names: [expectedName],
+      isGlobals: [false],
+    }),
+    MAIN,
+    AGENT,
+    hostname
+  );
+  assert.equal(replace.kind, "replace");
+  assert.equal(replace.oldAgent, OTHER);
+  assert.equal(replace.agentAddress, AGENT);
+  assert.equal(replace.delegator, MAIN);
+  assert.equal(replace.hostname, hostname);
+});
+
+test("readAgentAuthorizationIntent rejects ambiguous or malformed wallet state", async () => {
+  const safety = loadDashboardSafety();
+  const hostname = "grid.example";
+  const name = agentNameBytes32(hostname);
+  const invalidResults = [
+    {
+      agents: [OTHER, THIRD],
+      expiresAts: [1n, 2n],
+      isExpireds: [false, false],
+      names: [name, name],
+      isGlobals: [false, false],
+    },
+    {
+      agents: [OTHER],
+      expiresAts: [],
+      isExpireds: [false],
+      names: [name],
+      isGlobals: [false],
+    },
+    {
+      agents: [AGENT],
+      expiresAts: [1n],
+      isExpireds: [false],
+      names: [name],
+      isGlobals: [false],
+    },
+  ];
+
+  for (const result of invalidResults) {
+    await assert.rejects(
+      safety.readAgentAuthorizationIntent(
+        ethers,
+        walletAgentReader(result),
+        MAIN,
+        AGENT,
+        hostname
+      ),
+      /链上 Agent 状态/
+    );
+  }
+
+  await assert.rejects(
+    safety.readAgentAuthorizationIntent(
+      ethers,
+      { request: async () => "0x1234" },
+      MAIN,
+      AGENT,
+      hostname
+    ),
+    /链上 Agent 状态/
+  );
 });
 
 test("checkedAgentTransaction accepts exact approve and replace intents", () => {

@@ -16,6 +16,7 @@
     "function approveAgent(address agent,address delegator,bytes32 name,uint64 expiresAt,uint64 initialNonce,bool isGlobal)",
     "function replaceAgent(address oldAgent,address newAgent,uint64 expiresAt,uint64 initialNonce)",
     "function revokeAgent(address agent)",
+    "function getAgents(address delegator) view returns (address[] agents,uint64[] expiresAts,bool[] isExpireds,bytes32[] names,bool[] isGlobals)",
   ]);
 
   function escapeHtml(value) {
@@ -36,6 +37,101 @@
 
   function sameAddress(ethers, left, right) {
     return checkedAddress(ethers, left) === checkedAddress(ethers, right);
+  }
+
+  function checkedAgentName(ethers, hostname) {
+    try {
+      if (
+        typeof hostname !== "string" ||
+        hostname.length === 0 ||
+        hostname.length > 253 ||
+        !/^[A-Za-z0-9.-]+$/.test(hostname)
+      ) {
+        invalidTransaction();
+      }
+      return ethers.encodeBytes32String(`UI_${hostname}`.slice(0, 31));
+    } catch {
+      return invalidTransaction();
+    }
+  }
+
+  function invalidAgentState() {
+    throw new Error("钱包返回的链上 Agent 状态无效或不唯一。");
+  }
+
+  async function readAgentAuthorizationIntent(
+    ethers,
+    ethereum,
+    account,
+    agentAddress,
+    hostname
+  ) {
+    if (!ethers || !ethereum || typeof ethereum.request !== "function") {
+      invalidAgentState();
+    }
+    const delegator = checkedAddress(ethers, account);
+    const agent = checkedAddress(ethers, agentAddress);
+    const expectedName = checkedAgentName(ethers, hostname);
+    const accountInterface = new ethers.Interface(ACCOUNT_ABI);
+    const data = accountInterface.encodeFunctionData("getAgents", [delegator]);
+    const encoded = await ethereum.request({
+      method: "eth_call",
+      params: [{ to: POPDEX_ACCOUNT_PRECOMPILE, data }, "latest"],
+    });
+
+    let decoded;
+    try {
+      decoded = accountInterface.decodeFunctionResult("getAgents", encoded);
+    } catch {
+      return invalidAgentState();
+    }
+    const [agents, expiresAts, isExpireds, names, isGlobals] = decoded;
+    const length = agents.length;
+    if (
+      expiresAts.length !== length ||
+      isExpireds.length !== length ||
+      names.length !== length ||
+      isGlobals.length !== length
+    ) {
+      invalidAgentState();
+    }
+
+    const normalizedAgents = [];
+    for (let index = 0; index < length; index += 1) {
+      try {
+        normalizedAgents.push(checkedAddress(ethers, agents[index]));
+      } catch {
+        return invalidAgentState();
+      }
+      if (!/^0x[0-9a-fA-F]{64}$/.test(String(names[index]))) {
+        invalidAgentState();
+      }
+    }
+    const matchingIndexes = names
+      .map((name, index) =>
+        String(name).toLowerCase() === String(expectedName).toLowerCase() ? index : -1
+      )
+      .filter((index) => index >= 0);
+
+    if (matchingIndexes.length > 1) invalidAgentState();
+    if (matchingIndexes.length === 0) {
+      return Object.freeze({
+        kind: "approve",
+        agentAddress: agent,
+        delegator,
+        hostname,
+      });
+    }
+
+    const oldAgent = normalizedAgents[matchingIndexes[0]];
+    if (sameAddress(ethers, oldAgent, agent)) invalidAgentState();
+    return Object.freeze({
+      kind: "replace",
+      oldAgent,
+      agentAddress: agent,
+      delegator,
+      hostname,
+    });
   }
 
   function within(actual, expected, tolerance) {
@@ -143,5 +239,9 @@
     };
   }
 
-  window.DashboardSafety = Object.freeze({ escapeHtml, checkedAgentTransaction });
+  window.DashboardSafety = Object.freeze({
+    escapeHtml,
+    readAgentAuthorizationIntent,
+    checkedAgentTransaction,
+  });
 })();
