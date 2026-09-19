@@ -42,13 +42,13 @@ function walletAgentReader(result: {
   return {
     async request(payload: { method: string; params: unknown[] }) {
       assert.equal(payload.method, "eth_call");
-      assert.deepEqual(payload.params, [
-        {
-          to: POPDEX_ACCOUNT_PRECOMPILE,
-          data: accountInterface.encodeFunctionData("getAgents", [MAIN]),
-        },
-        "latest",
-      ]);
+      const call = payload.params[0] as { to: string; data: string };
+      assert.equal(call.to, POPDEX_ACCOUNT_PRECOMPILE);
+      assert.equal(
+        call.data,
+        accountInterface.encodeFunctionData("getAgents", [MAIN])
+      );
+      assert.equal(payload.params[1], "latest");
       return accountInterface.encodeFunctionResult("getAgents", [
         result.agents,
         result.expiresAts,
