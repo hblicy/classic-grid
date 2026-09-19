@@ -9,6 +9,17 @@
   let authorizationSubmitted = false;
   let authorizationVerified = false;
   let configuredStatus = null;
+  let operationInProgress = false;
+
+  const ACTION_IDS = [
+    "popdex-agent-generate",
+    "popdex-agent-copy",
+    "popdex-agent-authorize",
+    "popdex-agent-save",
+    "popdex-agent-refresh",
+    "popdex-agent-revoke",
+    "popdex-agent-clear",
+  ];
 
   const byId = (id) => document.getElementById(id);
 
@@ -16,6 +27,29 @@
     const element = byId("popdex-agent-status");
     element.className = kind;
     element.textContent = message;
+  }
+
+  function syncActionButtons() {
+    if (operationInProgress) {
+      for (const id of ACTION_IDS) byId(id).disabled = true;
+      return;
+    }
+    byId("popdex-agent-generate").disabled =
+      authorizationSubmitted || authorizationVerified;
+    byId("popdex-agent-copy").disabled = !generatedPrivateKey;
+    byId("popdex-agent-authorize").disabled =
+      !generatedPrivateKey || authorizationSubmitted || authorizationVerified;
+    byId("popdex-agent-save").disabled =
+      !generatedPrivateKey || !authorizationVerified;
+    byId("popdex-agent-refresh").disabled = false;
+    byId("popdex-agent-revoke").disabled = !(
+      configuredStatus && configuredStatus.configured && configuredStatus.exists
+    );
+    byId("popdex-agent-clear").disabled = !(
+      configuredStatus &&
+      configuredStatus.configured &&
+      configuredStatus.exists === false
+    );
   }
 
   function errorMessage(error) {
@@ -58,10 +92,6 @@
     if (!generatedAgentAddress) {
       byId("popdex-agent-address").textContent = status.agentAddress || "—";
     }
-    byId("popdex-agent-revoke").disabled = !(status.configured && status.exists);
-    byId("popdex-agent-clear").disabled = !(
-      status.configured && status.exists === false
-    );
     if (!status.configured) {
       setStatus("未配置临时 Agent");
     } else if (status.exists === false) {
@@ -74,6 +104,7 @@
     } else {
       setStatus(`已配置但授权无效：${status.reason || "原因未知"}`, "down");
     }
+    syncActionButtons();
   }
 
   async function refresh() {
@@ -104,9 +135,6 @@
     authorizationVerified = false;
     byId("popdex-agent-address").textContent = generatedAgentAddress;
     byId("popdex-agent-private").textContent = generatedPrivateKey;
-    byId("popdex-agent-copy").disabled = false;
-    byId("popdex-agent-authorize").disabled = false;
-    byId("popdex-agent-save").disabled = true;
     setStatus("新 Agent 只存在于本页内存，请先备份私钥再授权。", "down");
   }
 
@@ -205,8 +233,6 @@
       connectedMainAccount = mainAccount;
       authorizationVerified = true;
       byId("popdex-agent-main").textContent = mainAccount;
-      byId("popdex-agent-save").disabled = false;
-      byId("popdex-agent-authorize").disabled = true;
       setStatus(`链上授权已确认（${transactionHash}），请保存 Agent 私钥。`, "up");
     } catch (error) {
       if (transactionHash) {
@@ -234,9 +260,6 @@
     authorizationSubmitted = false;
     authorizationVerified = false;
     byId("popdex-agent-private").textContent = "私钥已保存；请重启进程后生效";
-    byId("popdex-agent-copy").disabled = true;
-    byId("popdex-agent-authorize").disabled = true;
-    byId("popdex-agent-save").disabled = true;
     await refresh();
   }
 
@@ -266,9 +289,6 @@
     authorizationSubmitted = false;
     authorizationVerified = false;
     byId("popdex-agent-private").textContent = message;
-    byId("popdex-agent-copy").disabled = true;
-    byId("popdex-agent-authorize").disabled = true;
-    byId("popdex-agent-save").disabled = true;
   }
 
   async function clearLocalAgent(skipConfirmation = false) {
@@ -329,33 +349,21 @@
     }
   }
 
-  function run(button, action) {
+  function run(action) {
     return async () => {
-      button.disabled = true;
+      if (operationInProgress) {
+        setStatus("已有 Agent 操作正在进行，请等待完成后重试。", "down");
+        return;
+      }
+      operationInProgress = true;
+      syncActionButtons();
       try {
         await action();
       } catch (error) {
         setStatus(errorMessage(error), "down");
       } finally {
-        if (button.id === "popdex-agent-refresh" || button.id === "popdex-agent-generate") {
-          button.disabled = false;
-        } else if (button.id === "popdex-agent-copy") {
-          button.disabled = !generatedPrivateKey;
-        } else if (button.id === "popdex-agent-authorize") {
-          button.disabled = !generatedPrivateKey || authorizationVerified;
-        } else if (button.id === "popdex-agent-save") {
-          button.disabled = !generatedPrivateKey || !authorizationVerified;
-        } else if (button.id === "popdex-agent-revoke") {
-          button.disabled = !(
-            configuredStatus && configuredStatus.configured && configuredStatus.exists
-          );
-        } else if (button.id === "popdex-agent-clear") {
-          button.disabled = !(
-            configuredStatus &&
-            configuredStatus.configured &&
-            configuredStatus.exists === false
-          );
-        }
+        operationInProgress = false;
+        syncActionButtons();
       }
     };
   }
@@ -371,7 +379,7 @@
   ];
   for (const [id, action] of actions) {
     const button = byId(id);
-    button.addEventListener("click", run(button, action));
+    button.addEventListener("click", run(action));
   }
   refresh().catch(() => {});
 })();

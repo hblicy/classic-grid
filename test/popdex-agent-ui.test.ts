@@ -259,6 +259,8 @@ test("verification failure after transaction submission keeps the draft non-disc
   await page.click("popdex-agent-generate");
   assert.equal(page.walletCount(), 1);
   assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+  assert.equal(page.elements.get("popdex-agent-generate")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
 });
 
 test("submitted authorization waiting for a receipt keeps the draft non-discardable", async () => {
@@ -291,6 +293,34 @@ test("wallet rejection before submission still allows replacing the draft", asyn
   await page.click("popdex-agent-generate");
   assert.equal(page.walletCount(), 2);
   assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey2");
+});
+
+test("saving an Agent blocks a concurrent clear operation", async () => {
+  const save = deferred<unknown>();
+  const saveStarted = deferred<void>();
+  const page = await loadAgentPage({
+    status: {
+      configured: true,
+      exists: false,
+      authorized: false,
+      mainAccount: "0x1000000000000000000000000000000000000001",
+      agentAddress: "0x2000000000000000000000000000000000000002",
+    },
+    confirmations: [true, true, true],
+    saveAgent: () => save.promise,
+    onSaveStarted: () => saveStarted.resolve(),
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  const saving = page.click("popdex-agent-save");
+  await saveStarted.promise;
+  await page.click("popdex-agent-clear");
+  assert.equal(
+    page.requests.filter((request) => request === "POST /api/popdex/agent/clear").length,
+    0
+  );
+  save.resolve({ saved: true });
+  await saving;
 });
 
 test("unverified Agent draft is replaced only after confirmation", async () => {
