@@ -234,3 +234,66 @@ test("unverified Agent draft is replaced only after confirmation", async () => {
   assert.equal(confirmed.walletCount(), 2);
   assert.equal(confirmed.elements.get("popdex-agent-private")?.textContent, "0xkey2");
 });
+
+test("clearing a revoked configured Agent preserves a different draft", async () => {
+  const page = await loadAgentPage({
+    status: {
+      configured: true,
+      exists: false,
+      authorized: false,
+      mainAccount: "0x1000000000000000000000000000000000000001",
+      agentAddress: "0x2000000000000000000000000000000000000002",
+    },
+    confirmations: [true],
+  });
+  await page.click("popdex-agent-generate");
+  const privateKey = page.elements.get("popdex-agent-private")?.textContent;
+  const address = page.elements.get("popdex-agent-address")?.textContent;
+  await page.click("popdex-agent-clear");
+  assert.ok(page.requests.includes("POST /api/popdex/agent/clear"));
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+  assert.equal(page.elements.get("popdex-agent-address")?.textContent, address);
+  assert.equal(page.elements.get("popdex-agent-copy")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, false);
+});
+
+test("revoking a configured Agent preserves a different draft during automatic cleanup", async () => {
+  const page = await loadAgentPage({
+    status: {
+      configured: true,
+      exists: true,
+      authorized: true,
+      mainAccount: "0x1000000000000000000000000000000000000001",
+      agentAddress: "0x2000000000000000000000000000000000000002",
+    },
+    confirmations: [true],
+  });
+  await page.click("popdex-agent-generate");
+  const privateKey = page.elements.get("popdex-agent-private")?.textContent;
+  await page.click("popdex-agent-revoke");
+  assert.ok(page.requests.includes("POST /api/popdex/agent/clear"));
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+  assert.equal(page.elements.get("popdex-agent-copy")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, false);
+});
+
+test("clearing without a draft keeps the existing reset behavior", async () => {
+  const page = await loadAgentPage({
+    status: {
+      configured: true,
+      exists: false,
+      authorized: false,
+      mainAccount: "0x1000000000000000000000000000000000000001",
+      agentAddress: "0x2000000000000000000000000000000000000002",
+    },
+    confirmations: [true],
+  });
+  await page.click("popdex-agent-clear");
+  assert.equal(
+    page.elements.get("popdex-agent-private")?.textContent,
+    "已清除本地 Agent 私钥"
+  );
+  assert.equal(page.elements.get("popdex-agent-copy")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, true);
+});

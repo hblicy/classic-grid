@@ -272,7 +272,9 @@
       return;
     }
     await clearAgent();
-    resetAgentState("已清除本地 Agent 私钥");
+    if (!generatedPrivateKey) {
+      resetAgentState("已清除本地 Agent 私钥");
+    }
     await refresh();
   }
 
