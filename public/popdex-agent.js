@@ -3,11 +3,26 @@
 
   const POPDEX_CHAIN_ID = "0x888";
   const RECEIPT_TIMEOUT_MS = 120000;
+  class RevertedTransactionError extends Error {}
+
   let generatedPrivateKey = null;
   let generatedAgentAddress = null;
   let connectedMainAccount = null;
+  let authorizationSubmitted = false;
   let authorizationVerified = false;
+  let authorizationTransactionHash = null;
   let configuredStatus = null;
+  let operationInProgress = false;
+
+  const ACTION_IDS = [
+    "popdex-agent-generate",
+    "popdex-agent-copy",
+    "popdex-agent-authorize",
+    "popdex-agent-save",
+    "popdex-agent-refresh",
+    "popdex-agent-revoke",
+    "popdex-agent-clear",
+  ];
 
   const byId = (id) => document.getElementById(id);
 
@@ -15,6 +30,31 @@
     const element = byId("popdex-agent-status");
     element.className = kind;
     element.textContent = message;
+  }
+
+  function syncActionButtons() {
+    if (operationInProgress) {
+      for (const id of ACTION_IDS) byId(id).disabled = true;
+      return;
+    }
+    byId("popdex-agent-generate").disabled =
+      authorizationSubmitted || authorizationVerified;
+    byId("popdex-agent-copy").disabled = !generatedPrivateKey;
+    byId("popdex-agent-authorize").disabled =
+      !generatedPrivateKey || authorizationSubmitted || authorizationVerified;
+    byId("popdex-agent-save").disabled =
+      !generatedPrivateKey ||
+      !connectedMainAccount ||
+      (!authorizationSubmitted && !authorizationVerified);
+    byId("popdex-agent-refresh").disabled = false;
+    byId("popdex-agent-revoke").disabled = !(
+      configuredStatus && configuredStatus.configured && configuredStatus.exists
+    );
+    byId("popdex-agent-clear").disabled = !(
+      configuredStatus &&
+      configuredStatus.configured &&
+      configuredStatus.exists === false
+    );
   }
 
   function errorMessage(error) {
@@ -53,13 +93,15 @@
   function renderStatus(status) {
     configuredStatus = status;
     byId("popdex-agent-main").textContent =
+      (generatedAgentAddress && connectedMainAccount) ||
       status.mainAccount || connectedMainAccount || "—";
     if (!generatedAgentAddress) {
       byId("popdex-agent-address").textContent = status.agentAddress || "—";
     }
-    byId("popdex-agent-revoke").disabled = !(status.configured && status.authorized);
     if (!status.configured) {
       setStatus("未配置临时 Agent");
+    } else if (status.exists === false) {
+      setStatus("链上 Agent 已撤销，可清除本地私钥。", "down");
     } else if (status.authorized) {
       setStatus(
         `已授权，有效期至 ${new Date(Number(status.expiresAt)).toLocaleString("zh-CN")}`,
@@ -68,12 +110,29 @@
     } else {
       setStatus(`已配置但授权无效：${status.reason || "原因未知"}`, "down");
     }
+    syncActionButtons();
   }
 
   async function refresh() {
     setStatus("正在读取链上状态…");
     try {
+      let revertedHash = null;
+      if (authorizationSubmitted && !authorizationVerified && authorizationTransactionHash) {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const network = await provider.getNetwork();
+        if (network.chainId !== BigInt(POPDEX_CHAIN_ID)) {
+          throw new Error("请将钱包切回 PopDEX 网络后刷新授权交易状态。");
+        }
+        const receipt = await provider.getTransactionReceipt(authorizationTransactionHash);
+        if (receipt && receipt.status === 0) {
+          revertedHash = authorizationTransactionHash;
+          unlockRevertedAuthorization();
+        }
+      }
       renderStatus(await getAgentStatus());
+      if (revertedHash) {
+        setStatus(`链上交易 ${revertedHash} 已回滚。Agent 私钥已保留，可重新授权。`, "down");
+      }
       return configuredStatus;
     } catch (error) {
       setStatus(`读取失败：${errorMessage(error)}`, "down");
@@ -81,17 +140,32 @@
     }
   }
 
+  function unlockRevertedAuthorization() {
+    authorizationSubmitted = false;
+    authorizationVerified = false;
+    authorizationTransactionHash = null;
+    connectedMainAccount = null;
+    byId("popdex-agent-main").textContent = configuredStatus?.mainAccount || "—";
+  }
+
   function generateAgent() {
+    if (authorizationSubmitted || authorizationVerified) {
+      throw new Error("当前 Agent 的链上授权交易已提交，请保留并保存该私钥。");
+    }
+    if (generatedPrivateKey) {
+      if (!window.confirm("当前未保存的 Agent 私钥将被永久覆盖，确认重新生成？")) {
+        return;
+      }
+    }
     const wallet = ethers.Wallet.createRandom();
     generatedPrivateKey = wallet.privateKey;
     generatedAgentAddress = wallet.address;
     connectedMainAccount = null;
+    authorizationSubmitted = false;
     authorizationVerified = false;
+    authorizationTransactionHash = null;
     byId("popdex-agent-address").textContent = generatedAgentAddress;
     byId("popdex-agent-private").textContent = generatedPrivateKey;
-    byId("popdex-agent-copy").disabled = false;
-    byId("popdex-agent-authorize").disabled = false;
-    byId("popdex-agent-save").disabled = true;
     setStatus("新 Agent 只存在于本页内存，请先备份私钥再授权。", "down");
   }
 
@@ -135,35 +209,17 @@
     return account;
   }
 
-  function checkedTransaction(prepared, account) {
-    if (
-      !prepared ||
-      prepared.from !== account ||
-      typeof prepared.to !== "string" ||
-      typeof prepared.data !== "string" ||
-      prepared.chainId !== POPDEX_CHAIN_ID
-    ) {
-      throw new Error("服务端返回的 Agent 交易参数与当前钱包不一致。");
-    }
-    return {
-      from: account,
-      to: prepared.to,
-      data: prepared.data,
-      value: prepared.value,
-      chainId: prepared.chainId,
-      type: prepared.type,
-      gas: prepared.gas,
-      gasPrice: prepared.gasPrice,
-    };
-  }
-
-  async function sendAndConfirm(transaction) {
+  async function sendAndConfirm(transaction, onSubmitted = null) {
     const transactionHash = await window.ethereum.request({
       method: "eth_sendTransaction",
       params: [transaction],
     });
+    if (onSubmitted) onSubmitted(transactionHash);
     const provider = new ethers.BrowserProvider(window.ethereum);
     const receipt = await provider.waitForTransaction(transactionHash, 1, RECEIPT_TIMEOUT_MS);
+    if (receipt && receipt.status === 0) {
+      throw new RevertedTransactionError(`PopDEX Agent 链上交易已回滚：${transactionHash}`);
+    }
     if (!receipt || Number(receipt.status) !== 1) {
       throw new Error(`PopDEX Agent 链上交易未成功确认：${transactionHash}`);
     }
@@ -174,30 +230,55 @@
     if (!generatedPrivateKey || !generatedAgentAddress) {
       throw new Error("请先生成临时 Agent。");
     }
+    if (authorizationSubmitted || authorizationVerified) {
+      throw new Error("当前 Agent 的链上授权交易已提交，请保留并保存该私钥。");
+    }
     const mainAccount = await connectWallet();
+    const intent = await DashboardSafety.readAgentAuthorizationIntent(
+      ethers,
+      window.ethereum,
+      mainAccount,
+      generatedAgentAddress,
+      window.location.hostname
+    );
     const prepared = await prepareApproval({
       agentAddress: generatedAgentAddress,
       delegator: mainAccount,
       hostname: window.location.hostname,
     });
-    const action = prepared.action === "replace" ? "替换现有同名 Agent" : "授权新 Agent";
-    if (!window.confirm(`确认使用主钱包 ${mainAccount} ${action}？\nAgent：${generatedAgentAddress}`)) {
-      return;
-    }
+    const checked = DashboardSafety.checkedAgentTransaction(
+      ethers,
+      prepared,
+      mainAccount,
+      intent
+    );
+    const confirmation =
+      checked.action === "replace"
+        ? `确认使用主钱包 ${mainAccount} 替换现有同名 Agent？\n旧 Agent：${checked.oldAgent}\n新 Agent：${checked.newAgent}`
+        : `确认使用主钱包 ${mainAccount} 授权新 Agent？\nAgent：${checked.newAgent}`;
+    if (!window.confirm(confirmation)) return;
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(checkedTransaction(prepared, mainAccount));
+      transactionHash = await sendAndConfirm(checked.transaction, (submittedHash) => {
+        transactionHash = submittedHash;
+        authorizationTransactionHash = submittedHash;
+        connectedMainAccount = mainAccount;
+        authorizationSubmitted = true;
+        byId("popdex-agent-main").textContent = mainAccount;
+      });
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
       connectedMainAccount = mainAccount;
       authorizationVerified = true;
       byId("popdex-agent-main").textContent = mainAccount;
-      byId("popdex-agent-save").disabled = false;
-      byId("popdex-agent-authorize").disabled = true;
       setStatus(`链上授权已确认（${transactionHash}），请保存 Agent 私钥。`, "up");
     } catch (error) {
+      if (error instanceof RevertedTransactionError) {
+        unlockRevertedAuthorization();
+        throw new Error(`${errorMessage(error)}。Agent 私钥已保留，可重新授权。`);
+      }
       if (transactionHash) {
         throw new Error(
-          `链上交易 ${transactionHash} 已确认，但授权回验失败：${errorMessage(error)}。请保留私钥，不要重复授权。`
+          `链上交易 ${transactionHash} 已提交，但授权确认或回验失败：${errorMessage(error)}。请保留私钥，不要重复授权；可点击“刷新链上状态”重新查询回执。`
         );
       }
       throw error;
@@ -205,8 +286,12 @@
   }
 
   async function persistAgent() {
-    if (!authorizationVerified || !generatedPrivateKey || !connectedMainAccount) {
-      throw new Error("Agent 尚未完成链上授权回验，拒绝保存。");
+    if (
+      (!authorizationSubmitted && !authorizationVerified) ||
+      !generatedPrivateKey ||
+      !connectedMainAccount
+    ) {
+      throw new Error("Agent 授权交易尚未提交，拒绝保存。");
     }
     if (!window.confirm("确认保存 Agent 私钥？请先暂停 PopDEX；主钱包私钥不会保存。")) {
       return;
@@ -217,11 +302,10 @@
     });
     generatedPrivateKey = null;
     generatedAgentAddress = null;
+    authorizationSubmitted = false;
     authorizationVerified = false;
+    authorizationTransactionHash = null;
     byId("popdex-agent-private").textContent = "私钥已保存；请重启进程后生效";
-    byId("popdex-agent-copy").disabled = true;
-    byId("popdex-agent-authorize").disabled = true;
-    byId("popdex-agent-save").disabled = true;
     await refresh();
   }
 
@@ -232,7 +316,7 @@
         status.configured &&
         status.mainAccount === mainAccount &&
         status.agentAddress === agentAddress &&
-        status.authorized === false
+        status.exists === false
       ) {
         renderStatus(status);
         return;
@@ -244,33 +328,64 @@
     );
   }
 
+  function resetAgentState(message) {
+    generatedPrivateKey = null;
+    generatedAgentAddress = null;
+    connectedMainAccount = null;
+    authorizationSubmitted = false;
+    authorizationVerified = false;
+    authorizationTransactionHash = null;
+    byId("popdex-agent-private").textContent = message;
+  }
+
+  async function clearLocalAgent(skipConfirmation = false) {
+    const status = await refresh();
+    if (!status || !status.configured || status.exists !== false) {
+      throw new Error("只有链上已不存在的 Agent 才能清除本地私钥。");
+    }
+    if (
+      !skipConfirmation &&
+      !window.confirm("确认清除本地 Agent 私钥？链上 Agent 必须已经撤销。")
+    ) {
+      return;
+    }
+    await clearAgent();
+    if (!generatedPrivateKey) {
+      resetAgentState("已清除本地 Agent 私钥");
+    }
+    await refresh();
+  }
+
   async function revokeAgent() {
     const status = await refresh();
-    if (!status || !status.configured || !status.authorized || !status.mainAccount || !status.agentAddress) {
-      throw new Error("当前没有可撤销的有效 Agent。");
+    if (
+      !status ||
+      !status.configured ||
+      !status.exists ||
+      !status.mainAccount ||
+      !status.agentAddress
+    ) {
+      throw new Error("当前没有可撤销的链上 Agent。");
     }
     const mainAccount = await connectWallet(status.mainAccount);
     const prepared = await prepareRevoke({
       mainAccount,
       agentAddress: status.agentAddress,
     });
+    const checked = DashboardSafety.checkedAgentTransaction(
+      ethers,
+      prepared,
+      mainAccount,
+      { kind: "revoke", agentAddress: status.agentAddress }
+    );
     if (!window.confirm(`确认撤销 Agent ${status.agentAddress}？请确保 PopDEX 已暂停。`)) {
       return;
     }
     let transactionHash = null;
     try {
-      transactionHash = await sendAndConfirm(checkedTransaction(prepared, mainAccount));
+      transactionHash = await sendAndConfirm(checked.transaction);
       await waitUntilRevoked(mainAccount, status.agentAddress);
-      await clearAgent();
-      generatedPrivateKey = null;
-      generatedAgentAddress = null;
-      connectedMainAccount = null;
-      authorizationVerified = false;
-      byId("popdex-agent-private").textContent = "已撤销并清除本地 Agent 私钥";
-      byId("popdex-agent-copy").disabled = true;
-      byId("popdex-agent-authorize").disabled = true;
-      byId("popdex-agent-save").disabled = true;
-      await refresh();
+      await clearLocalAgent(true);
     } catch (error) {
       if (transactionHash) {
         throw new Error(
@@ -281,25 +396,21 @@
     }
   }
 
-  function run(button, action) {
+  function run(action) {
     return async () => {
-      button.disabled = true;
+      if (operationInProgress) {
+        setStatus("已有 Agent 操作正在进行，请等待完成后重试。", "down");
+        return;
+      }
+      operationInProgress = true;
+      syncActionButtons();
       try {
         await action();
       } catch (error) {
         setStatus(errorMessage(error), "down");
       } finally {
-        if (button.id === "popdex-agent-refresh" || button.id === "popdex-agent-generate") {
-          button.disabled = false;
-        } else if (button.id === "popdex-agent-copy") {
-          button.disabled = !generatedPrivateKey;
-        } else if (button.id === "popdex-agent-authorize") {
-          button.disabled = !generatedPrivateKey || authorizationVerified;
-        } else if (button.id === "popdex-agent-save") {
-          button.disabled = !generatedPrivateKey || !authorizationVerified;
-        } else if (button.id === "popdex-agent-revoke") {
-          button.disabled = !(configuredStatus && configuredStatus.configured && configuredStatus.authorized);
-        }
+        operationInProgress = false;
+        syncActionButtons();
       }
     };
   }
@@ -311,10 +422,11 @@
     ["popdex-agent-save", persistAgent],
     ["popdex-agent-refresh", refresh],
     ["popdex-agent-revoke", revokeAgent],
+    ["popdex-agent-clear", clearLocalAgent],
   ];
   for (const [id, action] of actions) {
     const button = byId(id);
-    button.addEventListener("click", run(button, action));
+    button.addEventListener("click", run(action));
   }
   refresh().catch(() => {});
 })();

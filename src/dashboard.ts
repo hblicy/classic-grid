@@ -198,6 +198,7 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
 
 export type DashboardServerOptions = {
   env?: NodeJS.ProcessEnv;
+  popdexConfigured?: boolean;
   agentService?: Pick<
     PopdexAgentService,
     | "status"
@@ -208,6 +209,20 @@ export type DashboardServerOptions = {
     | "clear"
   >;
 };
+
+export function popdexAgentMutationAllowed(input: {
+  dryRun: boolean;
+  popdexConfigured: boolean;
+  globallyPaused: boolean;
+  venuePaused: boolean;
+}): boolean {
+  return (
+    input.dryRun ||
+    !input.popdexConfigured ||
+    input.globallyPaused ||
+    input.venuePaused
+  );
+}
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
@@ -230,11 +245,13 @@ export function startDashboardServer(
       rpcClient: new PopdexAgentRpc(),
       envFile: path.resolve(process.cwd(), ".env"),
       processEnv: env,
-      canMutate: () => {
-        const popdexVisible = snapshot.venues.some((venue) => venue.venue === "popdex");
-        if (snapshot.dryRun || !popdexVisible || snapshot.paused) return true;
-        return isVenuePaused("popdex");
-      },
+      canMutate: () =>
+        popdexAgentMutationAllowed({
+          dryRun: snapshot.dryRun,
+          popdexConfigured: options.popdexConfigured ?? false,
+          globallyPaused: snapshot.paused,
+          venuePaused: isVenuePaused("popdex"),
+        }),
     });
 
   const server = http.createServer(async (req, res) => {
@@ -244,7 +261,7 @@ export function startDashboardServer(
         sendUnauthorized(res);
         return;
       }
-      if (req.method === "POST") validateMutationRequest(req);
+      if (req.method === "POST") validateMutationRequest(req, security);
 
       const url = req.url?.split("?")[0] || "/";
       if (url === "/api/snapshot" || url === "/api/status" || url === "/api/overview") {
@@ -470,6 +487,21 @@ export function startDashboardServer(
           "Cache-Control": "public, max-age=31536000, immutable",
         });
         fs.createReadStream(ETHERS_JS_FILE).pipe(res);
+        return;
+      }
+      if (url === "/dashboard-safety.js") {
+        const scriptPath = path.join(PUBLIC_DIR, "dashboard-safety.js");
+        if (!fs.existsSync(scriptPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("public/dashboard-safety.js missing");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(fs.readFileSync(scriptPath));
         return;
       }
       if (url === "/popdex-agent.js") {

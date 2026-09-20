@@ -116,6 +116,72 @@ test("executor reads the main account, signs as Agent, and encodes main ownershi
   assert.equal(decoded.args?.[0], MAIN);
 });
 
+test("executor sends explicit monotonic millisecond Agent nonces", async () => {
+  const sent: any[] = [];
+  const nowValues = [1_700_000_000_123, 1_700_000_000_123, 1_699_999_999_000];
+  const executor = new PopdexExecutor(false, {
+    env: {
+      POPDEX_MAIN_ACCOUNT: MAIN,
+      POPDEX_AGENT_PRIVATE_KEY: AGENT_KEY,
+      POPDEX_SYMBOL: "BTCUSDT",
+      POPDEX_ORDER_GAP_MS: "0",
+    },
+    now: () => nowValues.shift()!,
+    apiGet: async <T,>(pathname: string): Promise<T> => {
+      if (pathname.startsWith("/api/v1/config/symbol")) {
+        return {
+          symbolId: 20000,
+          tickSize: 1,
+          lotSize: 0.0001,
+          minQty: 0.0001,
+          minNotional: 10,
+        } as T;
+      }
+      return [] as T;
+    },
+    agentRpc: {
+      async verifyChain() {},
+      async getAgentInfo() {
+        return {
+          exists: true,
+          expiresAt: String(Date.now() + 86_400_000),
+          isExpired: false,
+          delegator: MAIN,
+          name: `0x${"00".repeat(32)}` as const,
+          isGlobal: false,
+        };
+      },
+    },
+    createWallet: () => ({
+      async sendTransaction(transaction: any) {
+        sent.push(transaction);
+        return HASH;
+      },
+    }),
+    createPublic: () => ({
+      async getTransactionReceipt() {
+        return { status: "success" as const };
+      },
+    }),
+    sleep: async () => {},
+  });
+
+  await executor.connect();
+  for (const price of [90, 91, 92]) {
+    await executor.apply([
+      {
+        type: "place",
+        order: { market: "BTC", side: "buy", price, size: 0.2, level: 1 },
+      },
+    ]);
+  }
+
+  assert.deepEqual(
+    sent.map((transaction) => transaction.nonce),
+    [1_700_000_000_123, 1_700_000_000_124, 1_700_000_000_125]
+  );
+});
+
 test("executor refuses invalid authorization before creating a signer", async () => {
   let wallets = 0;
   const executor = new PopdexExecutor(false, {

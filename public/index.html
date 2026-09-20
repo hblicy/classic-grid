@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#0d1117" />
   <title>网格总看板 · 8088</title>
   <script src="/vendor/ethers.js?v=6.13.5-umd"></script>
+  <script src="/dashboard-safety.js"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -337,7 +338,7 @@
 
     <p class="section-title" style="color:#e85d75">PopDEX Agent 钱包</p>
     <section class="agent-card">
-      <p class="meta">主钱包只负责在浏览器钱包中授权或撤销；应用仅保存可撤销的 Agent 私钥。保存、替换或撤销前请先暂停 PopDEX，完成后重启进程。</p>
+      <p class="meta">主钱包只负责在浏览器钱包中授权或撤销；应用仅保存可撤销的 Agent 私钥。授权、替换、保存、撤销或清理前请先暂停 PopDEX，完成后重启进程。</p>
       <div class="agent-grid">
         <div class="agent-field"><b>授权状态</b><span id="popdex-agent-status">正在读取…</span></div>
         <div class="agent-field"><b>主账户</b><span id="popdex-agent-main">—</span></div>
@@ -351,6 +352,7 @@
         <button type="button" id="popdex-agent-save" disabled>3. 验证并保存</button>
         <button type="button" id="popdex-agent-refresh">刷新链上状态</button>
         <button type="button" id="popdex-agent-revoke" class="danger" disabled>撤销并清除本地私钥</button>
+        <button type="button" id="popdex-agent-clear" class="danger" disabled>仅清除已撤销的本地私钥</button>
       </div>
     </section>
 
@@ -656,7 +658,7 @@
           <td>${volOk ? usdShort(o.volume) : "-"}</td>
           <td>${n(v.gridCount)}</td>
           <td class="${v.unrealizedPnl != null && Number.isFinite(n(v.unrealizedPnl)) ? cls(v.unrealizedPnl) : ""}">${v.unrealizedPnl != null && Number.isFinite(n(v.unrealizedPnl)) ? signed(v.unrealizedPnl) : "-"}</td>
-          <td class="meta" style="white-space:normal;max-width:200px">${v.lastError || (paused ? "已暂停（可手动撤单/平仓）" : (v.seeded ? "运行中" : "待铺"))}</td>
+          <td class="meta" style="white-space:normal;max-width:200px">${v.lastError ? DashboardSafety.escapeHtml(v.lastError) : (paused ? "已暂停（可手动撤单/平仓）" : (v.seeded ? "运行中" : "待铺"))}</td>
           <td>${vcBtns}</td>
         </tr>`;
       }).join("") + (() => {

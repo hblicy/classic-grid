@@ -7,7 +7,8 @@
 
 ## Dashboard
 
-- Without `DASHBOARD_TOKEN`, the dashboard only listens on `127.0.0.1`.
+- Without `DASHBOARD_TOKEN`, the dashboard only listens on `127.0.0.1` and rejects mutation requests whose Host is not `localhost`, `127.0.0.1`, or `[::1]`.
 - Remote listening requires a `DASHBOARD_TOKEN` of at least 16 characters. The dashboard uses HTTP Basic Auth; keep the token out of URLs, logs, screenshots, and source control.
 - Do not expose the dashboard directly to the public internet. Use an authenticated SSH tunnel, Tailscale network, or a TLS reverse proxy with access control.
 - PopDEX stores only the Agent private key. Never enter or save the main wallet private key in this project.
+- Pause PopDEX before authorizing, replacing, saving, revoking, or clearing an Agent. If chain revocation succeeds but local cleanup fails, retry with the dashboard's local-clear action; it refuses to delete the key while the Agent still exists on chain.

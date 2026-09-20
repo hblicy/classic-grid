@@ -26,6 +26,7 @@ export type PublicAgentStatus = {
   configured: boolean;
   mainAccount: string | null;
   agentAddress?: string;
+  exists?: boolean;
   authorized?: boolean;
   reason?: string | null;
   expiresAt?: string;
@@ -38,9 +39,12 @@ function escapeRegExp(value: string): string {
 
 function setEnvLine(content: string, key: string, value: string): string {
   const line = value ? `${key}=${value}` : `# ${key}=`;
-  const pattern = new RegExp(`^\\s*(?:#\\s*)?${escapeRegExp(key)}\\s*=.*$`, "m");
-  if (pattern.test(content)) return content.replace(pattern, line);
-  const prefix = content.trimEnd();
+  const pattern = new RegExp(`^\\s*(?:#\\s*)?${escapeRegExp(key)}\\s*=.*$`);
+  const prefix = content
+    .split(/\r?\n/)
+    .filter((existingLine) => !pattern.test(existingLine))
+    .join("\n")
+    .trimEnd();
   return `${prefix}${prefix ? "\n" : ""}${line}\n`;
 }
 
@@ -79,6 +83,7 @@ export class PopdexAgentService {
   private readonly platform: NodeJS.Platform;
   private readonly now: () => number;
   private readonly canMutate: () => boolean;
+  private identityWriteTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
     rpcClient?: AgentRpc;
@@ -105,6 +110,20 @@ export class PopdexAgentService {
     }
   }
 
+  private async withIdentityWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.identityWriteTail;
+    let release!: () => void;
+    this.identityWriteTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private async inspectAuthorization(
     mainAccount: string,
     agentAddress: string
@@ -120,6 +139,7 @@ export class PopdexAgentService {
       configured: true,
       mainAccount: main,
       agentAddress: agent,
+      exists: info.exists,
       authorized: reason === null,
       reason,
       expiresAt: info.expiresAt,
@@ -160,6 +180,7 @@ export class PopdexAgentService {
     delegator: string;
     hostname: string;
   }): Promise<PreparedAgentTransaction & { from: string }> {
+    this.assertMutationAllowed();
     const main = strictAddress(input.delegator, "delegator");
     await this.rpcClient.verifyChain();
     const existingAgents = await this.rpcClient.getAgents(main);
@@ -179,15 +200,17 @@ export class PopdexAgentService {
     mainAccount: string;
     agentPrivateKey: string;
   }): Promise<PublicAgentStatus> {
-    this.assertMutationAllowed();
-    const main = strictAddress(input.mainAccount, "mainAccount");
-    const agentAddress = deriveAgentAddress(input.agentPrivateKey);
-    const status = await this.verifyAuthorization({ mainAccount: main, agentAddress });
-    this.writeSettings({
-      [MAIN_ACCOUNT_KEY]: main,
-      [AGENT_PRIVATE_KEY]: input.agentPrivateKey,
+    return this.withIdentityWrite(async () => {
+      this.assertMutationAllowed();
+      const main = strictAddress(input.mainAccount, "mainAccount");
+      const agentAddress = deriveAgentAddress(input.agentPrivateKey);
+      const status = await this.verifyAuthorization({ mainAccount: main, agentAddress });
+      this.writeSettings({
+        [MAIN_ACCOUNT_KEY]: main,
+        [AGENT_PRIVATE_KEY]: input.agentPrivateKey,
+      });
+      return status;
     });
-    return status;
   }
 
   async prepareRevoke(input: {
@@ -195,31 +218,48 @@ export class PopdexAgentService {
     agentAddress: string;
   }): Promise<PreparedAgentTransaction & { from: string }> {
     this.assertMutationAllowed();
-    const status = await this.verifyAuthorization(input);
+    const main = strictAddress(input.mainAccount, "mainAccount");
+    const agent = strictAddress(input.agentAddress, "agentAddress");
+    if (main === agent) throw new Error("PopDEX Agent 地址与主账户不能相同。");
+    const status = await this.inspectAuthorization(main, agent);
+    if (!status.info.exists) {
+      throw new Error("PopDEX Agent 链上不存在，无需撤销。");
+    }
+    if (status.info.delegator !== main) {
+      throw new Error(
+        `PopDEX Agent delegator=${status.info.delegator || "null"}，预期 ${main}。`
+      );
+    }
     return {
-      from: status.mainAccount!,
-      ...prepareAgentRevocation(status.agentAddress!),
+      from: main,
+      ...prepareAgentRevocation(agent),
     };
   }
 
   async clear(): Promise<{ configured: false; mainAccount: string | null }> {
-    this.assertMutationAllowed();
-    const rawMain = this.processEnv[MAIN_ACCOUNT_KEY] || "";
-    const privateKey = this.processEnv[AGENT_PRIVATE_KEY] || "";
-    const main = rawMain ? strictAddress(rawMain, "mainAccount") : null;
-    if (!privateKey) return { configured: false, mainAccount: main };
-    if (!main) throw new Error("PopDEX Agent 已配置私钥但缺少主账户。");
-    const agentAddress = deriveAgentAddress(privateKey);
-    await this.rpcClient.verifyChain();
-    const info = await this.rpcClient.getAgentInfo(agentAddress);
-    if (info.exists) {
-      throw new Error("PopDEX Agent 链上撤销尚未确认，拒绝清除本地私钥。");
-    }
-    this.writeSettings({ [AGENT_PRIVATE_KEY]: "" });
-    return { configured: false, mainAccount: main };
+    return this.withIdentityWrite(async () => {
+      this.assertMutationAllowed();
+      const rawMain = this.processEnv[MAIN_ACCOUNT_KEY] || "";
+      const privateKey = this.processEnv[AGENT_PRIVATE_KEY] || "";
+      const main = rawMain ? strictAddress(rawMain, "mainAccount") : null;
+      if (!privateKey) return { configured: false, mainAccount: main };
+      if (!main) throw new Error("PopDEX Agent 已配置私钥但缺少主账户。");
+      const agentAddress = deriveAgentAddress(privateKey);
+      await this.rpcClient.verifyChain();
+      const info = await this.rpcClient.getAgentInfo(agentAddress);
+      if (info.exists) {
+        throw new Error("PopDEX Agent 链上撤销尚未确认，拒绝清除本地私钥。");
+      }
+      if ((this.processEnv[AGENT_PRIVATE_KEY] || "") !== privateKey) {
+        throw new Error("PopDEX Agent 配置已变化，拒绝清除当前私钥。");
+      }
+      this.writeSettings({ [AGENT_PRIVATE_KEY]: "" });
+      return { configured: false, mainAccount: main };
+    });
   }
 
   private writeSettings(values: Record<string, string>): void {
+    this.assertMutationAllowed();
     let content = this.fsImpl.existsSync(this.envFile)
       ? String(this.fsImpl.readFileSync(this.envFile, "utf8"))
       : "";

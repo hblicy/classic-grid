@@ -60,7 +60,7 @@ export function authorizeRequest(
   req: IncomingMessage,
   config: DashboardSecurityConfig
 ): boolean {
-  if (!config.authRequired) return true;
+  if (!config.authRequired) return isLoopbackHost(singleHeader(req, "host"));
   const credentials = parseBasic(req.headers.authorization);
   if (!credentials) return false;
   return (
@@ -84,7 +84,20 @@ function singleHeader(req: IncomingMessage, name: string): string | undefined {
   return value;
 }
 
-export function validateMutationRequest(req: IncomingMessage): void {
+function isLoopbackHost(host: string | undefined): boolean {
+  if (!host) return false;
+  try {
+    const hostname = new URL(`http://${host}`).hostname.toLowerCase();
+    return ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function validateMutationRequest(
+  req: IncomingMessage,
+  config: DashboardSecurityConfig
+): void {
   const contentType = singleHeader(req, "content-type") || "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
     throw new HttpRequestError(415, "Content-Type 必须是 application/json");
@@ -108,6 +121,9 @@ export function validateMutationRequest(req: IncomingMessage): void {
     origin.host.toLowerCase() !== host.toLowerCase()
   ) {
     throw new HttpRequestError(403, "Origin 与当前 Dashboard 不同源");
+  }
+  if (!config.authRequired && !isLoopbackHost(host)) {
+    throw new HttpRequestError(403, "无 Token 模式只允许 loopback Host");
   }
 }
 

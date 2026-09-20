@@ -520,7 +520,9 @@ export async function runLoop(opts?: { once?: boolean }): Promise<void> {
   );
 
   setDashboardMeta({ dryRun: cfg.dryRun });
-  const dash = startDashboardServer(cfg.dashboardPort);
+  const dash = startDashboardServer(cfg.dashboardPort, {
+    popdexConfigured: cfg.venues.includes("popdex"),
+  });
 
   // 后台拉官方日统计（不阻塞启动）
   void refreshOfficialStats({ force: true })
