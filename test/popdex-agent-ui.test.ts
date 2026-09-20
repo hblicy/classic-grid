@@ -74,6 +74,7 @@ async function loadAgentPage(
     agentAddress: null,
   };
   let walletCount = 0;
+  let transactionCount = 0;
   const requests: string[] = [];
   const confirmations = [...(options.confirmations ?? [])];
   const wallets = [
@@ -151,6 +152,7 @@ async function loadAgentPage(
           if (method === "eth_chainId") return "0x888";
           if (method === "eth_sendTransaction") {
             if (options.sendError) throw options.sendError;
+            transactionCount += 1;
             configuredStatus = { ...configuredStatus, exists: false, authorized: false };
             options.onTransactionSubmitted?.();
             return "0xtx";
@@ -177,6 +179,7 @@ async function loadAgentPage(
     requests,
     confirmations,
     walletCount: () => walletCount,
+    transactionCount: () => transactionCount,
     setStatus: (status: Record<string, unknown>) => {
       configuredStatus = status;
     },
@@ -261,6 +264,26 @@ test("verification failure after transaction submission keeps the draft non-disc
   assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
   assert.equal(page.elements.get("popdex-agent-generate")?.disabled, true);
   assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+});
+
+test("submitted authorization can be verified and saved without resending", async () => {
+  const page = await loadAgentPage({
+    confirmations: [true, true],
+    verifyError: new Error("verify failed"),
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, false);
+  assert.equal(page.transactionCount(), 1);
+  await page.click("popdex-agent-save");
+
+  assert.ok(page.requests.includes("POST /api/popdex/agent/save"));
+  assert.equal(page.transactionCount(), 1);
+  assert.equal(
+    page.elements.get("popdex-agent-private")?.textContent,
+    "私钥已保存；请重启进程后生效"
+  );
 });
 
 test("submitted authorization waiting for a receipt keeps the draft non-discardable", async () => {

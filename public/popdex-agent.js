@@ -40,7 +40,9 @@
     byId("popdex-agent-authorize").disabled =
       !generatedPrivateKey || authorizationSubmitted || authorizationVerified;
     byId("popdex-agent-save").disabled =
-      !generatedPrivateKey || !authorizationVerified;
+      !generatedPrivateKey ||
+      !connectedMainAccount ||
+      (!authorizationSubmitted && !authorizationVerified);
     byId("popdex-agent-refresh").disabled = false;
     byId("popdex-agent-revoke").disabled = !(
       configuredStatus && configuredStatus.configured && configuredStatus.exists
@@ -227,6 +229,7 @@
     try {
       transactionHash = await sendAndConfirm(checked.transaction, (submittedHash) => {
         transactionHash = submittedHash;
+        connectedMainAccount = mainAccount;
         authorizationSubmitted = true;
       });
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
@@ -245,8 +248,12 @@
   }
 
   async function persistAgent() {
-    if (!authorizationVerified || !generatedPrivateKey || !connectedMainAccount) {
-      throw new Error("Agent 尚未完成链上授权回验，拒绝保存。");
+    if (
+      (!authorizationSubmitted && !authorizationVerified) ||
+      !generatedPrivateKey ||
+      !connectedMainAccount
+    ) {
+      throw new Error("Agent 授权交易尚未提交，拒绝保存。");
     }
     if (!window.confirm("确认保存 Agent 私钥？请先暂停 PopDEX；主钱包私钥不会保存。")) {
       return;
