@@ -24,6 +24,7 @@ import {
   enqueueVenueCommand,
   getPendingCommands,
   isVenuePaused,
+  isVenueCommandExecuting,
   loadVenueControl,
   type VenueControlAction,
 } from "./venueControl.js";
@@ -246,6 +247,7 @@ export function startDashboardServer(
       envFile: path.resolve(process.cwd(), ".env"),
       processEnv: env,
       canMutate: () =>
+        !isVenueCommandExecuting("popdex") &&
         popdexAgentMutationAllowed({
           dryRun: snapshot.dryRun,
           popdexConfigured: options.popdexConfigured ?? false,

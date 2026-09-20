@@ -13,6 +13,7 @@
  *   ticker / books / order / position / fill / account
  */
 import {
+  BaseError,
   createPublicClient,
   createWalletClient,
   custom,
@@ -456,6 +457,15 @@ export class PopdexExecutor implements VenueExecutor {
       gas,
       gasPrice: 0n,
       nonce: this.nextAgentNonce(),
+    }).catch((error: unknown) => {
+      if (!(error instanceof BaseError)) throw error;
+      // viem 的 message 先列出长 calldata，RPC 原因在末尾；先提取 details 再限长。
+      const reason = (error.details || error.shortMessage)
+        .replace(/0x[0-9a-fA-F]{64,}/g, "[redacted hex]")
+        .replace(/\s+/g, " ")
+        .slice(0, 1000);
+      console.error(`[popdex] sendTransaction failed: ${reason}`);
+      throw new Error(`PopDEX sendTransaction: ${reason}`, { cause: error });
     });
     for (let i = 0; i < 30; i++) {
       await this.sleep(400);

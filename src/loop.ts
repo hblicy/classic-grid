@@ -19,6 +19,8 @@ import {
   isVenuePaused,
   takePendingCommands,
   setVenueControl,
+  syncVenuePauseBeforeReconnect,
+  withVenueCommandExecution,
 } from "./venueControl.js";
 import {
   assertFeeOk,
@@ -305,7 +307,7 @@ async function tickOne(
   cfg: RuntimeConfig
 ): Promise<void> {
   // 单所控制命令：每 tick 优先执行（暂停/单边锁之外的瞬时操作）
-  await executeVenueCommands(rt, market);
+  await withVenueCommandExecution(rt.ex.id, () => executeVenueCommands(rt, market));
 
   // 紧急暂停（全局）或单所暂停：只读刷新看板，绝不 apply
   if (isBotPaused() || isVenuePaused(rt.ex.id)) {
@@ -688,6 +690,7 @@ export async function runLoop(opts?: { once?: boolean }): Promise<void> {
         try {
           // 首连失败（如 Ext 429）时每轮重试，避免整场卡死
           if (!rt.seeded && rt.lastError) {
+            syncVenuePauseBeforeReconnect(rt.ex.id);
             try {
               rt.ex.disconnect();
             } catch {
