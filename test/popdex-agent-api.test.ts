@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
 import http, { type Server } from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   popdexAgentMutationAllowed,
   startDashboardServer,
+  setDashboardMeta,
 } from "../src/dashboard.js";
 import { POPDEX_ACCOUNT_PRECOMPILE } from "../src/popdex/agent.js";
+import {
+  getVenueControl,
+  loadVenueControl,
+  syncVenuePauseBeforeReconnect,
+  setVenueControl,
+  enqueueVenueCommand,
+  withVenueCommandExecution,
+  isVenueCommandExecuting,
+  takePendingCommands,
+} from "../src/venueControl.js";
 
 const TOKEN = "1234567890abcdef";
 const MAIN = "0x1000000000000000000000000000000000000001";
@@ -242,5 +256,119 @@ test("Agent API never reflects a submitted private key in errors", async () => {
     assert.doesNotMatch(JSON.stringify(response.body), new RegExp(SECRET));
   } finally {
     await close(server);
+  }
+});
+
+test("venue pause and resume take effect at the reconnect boundary without a connected executor", async () => {
+  const cwd = process.cwd();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grid-venue-pause-"));
+  process.chdir(dir);
+  fs.mkdirSync("data");
+  const file = path.join(dir, "data", "venue-control.json");
+  fs.writeFileSync(file, JSON.stringify({
+    venues: { popdex: { paused: false, holdSide: "long", updatedAt: "" } },
+    pending: [
+      { id: "old-resume", venue: "popdex", action: "resume", at: "" },
+      { id: "cancel", venue: "popdex", action: "cancel-sells", at: "" },
+      { id: "other-pause", venue: "extended", action: "pause", at: "" },
+    ],
+  }));
+  loadVenueControl();
+  const server = startDashboardServer(0, {
+    env: { DASHBOARD_TOKEN: TOKEN },
+    agentService: fakeService(),
+  });
+  assert.ok(server);
+  try {
+    const port = await listening(server);
+    const paused = await request(port, "/api/venue-control", {
+      method: "POST", body: { venue: "popdex", action: "pause" },
+    });
+    assert.equal(paused.status, 200);
+    // The HTTP request cannot mark an in-flight trading batch as stopped.
+    assert.equal(getVenueControl("popdex").paused, false);
+    syncVenuePauseBeforeReconnect("popdex");
+    assert.equal(getVenueControl("popdex").paused, true);
+    assert.equal(getVenueControl("popdex").holdSide, "neutral");
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).venues.popdex.paused, true);
+    // Keep FIFO order: a later pause must still follow an earlier trading command.
+    assert.deepEqual(takePendingCommands("popdex").map((cmd) => cmd.action), ["resume", "cancel-sells", "pause"]);
+    assert.deepEqual(takePendingCommands("extended").map((cmd) => cmd.action), ["pause"]);
+
+    const resumed = await request(port, "/api/venue-control", {
+      method: "POST", body: { venue: "popdex", action: "resume" },
+    });
+    assert.equal(resumed.status, 200);
+    assert.equal(getVenueControl("popdex").paused, true);
+    syncVenuePauseBeforeReconnect("popdex");
+    assert.equal(getVenueControl("popdex").paused, false);
+    assert.equal(getVenueControl("popdex").holdSide, "neutral");
+    assert.deepEqual(takePendingCommands("popdex").map((cmd) => cmd.action), ["resume"]);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).venues.popdex.paused, false);
+
+    enqueueVenueCommand("popdex", "flat-reseed");
+    enqueueVenueCommand("popdex", "pause");
+    syncVenuePauseBeforeReconnect("popdex");
+    assert.equal(getVenueControl("popdex").paused, true);
+    assert.deepEqual(takePendingCommands("popdex").map((cmd) => cmd.action), ["flat-reseed", "pause"]);
+    setVenueControl("popdex", { holdSide: "long" });
+    enqueueVenueCommand("popdex", "cancel-sells");
+    enqueueVenueCommand("popdex", "resume");
+    syncVenuePauseBeforeReconnect("popdex");
+    assert.equal(getVenueControl("popdex").holdSide, "neutral");
+    assert.deepEqual(takePendingCommands("popdex").map((cmd) => cmd.action), ["cancel-sells", "resume"]);
+  } finally {
+    await close(server);
+    process.chdir(cwd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed connection path synchronizes pause before retrying connect", () => {
+  const loop = fs.readFileSync(new URL("../src/loop.ts", import.meta.url), "utf8");
+  const retry = loop.indexOf("if (!rt.seeded && rt.lastError)");
+  const sync = loop.indexOf("syncVenuePauseBeforeReconnect(rt.ex.id)", retry);
+  const connect = loop.indexOf("await rt.ex.connect()", retry);
+  assert.ok(retry >= 0 && sync > retry && sync < connect);
+  assert.match(loop, /await withVenueCommandExecution\(rt\.ex\.id, \(\) => executeVenueCommands\(rt, market\)\)/);
+});
+
+test("paused venue cannot mutate Agent while an earlier trading command is still executing", async () => {
+  const cwd = process.cwd();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grid-venue-busy-"));
+  process.chdir(dir);
+  setVenueControl("popdex", { paused: true });
+  setDashboardMeta({ dryRun: false });
+  // Use the real Agent service; with no configured key, clear needs no external RPC or file write.
+  const server = startDashboardServer(0, {
+    env: { DASHBOARD_TOKEN: TOKEN }, popdexConfigured: true,
+  });
+  assert.ok(server);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const running = withVenueCommandExecution("popdex", () => blocked);
+  try {
+    const port = await listening(server);
+    const busy = await request(port, "/api/popdex/agent/clear", { method: "POST", body: {} });
+    assert.equal(busy.status, 400);
+    assert.match(busy.body.error, /暂停/);
+    assert.equal(isVenueCommandExecuting("popdex"), true);
+    release();
+    await running;
+    assert.equal(isVenueCommandExecuting("popdex"), false);
+    const idle = await request(port, "/api/popdex/agent/clear", { method: "POST", body: {} });
+    assert.equal(idle.status, 200);
+
+    await assert.rejects(withVenueCommandExecution("popdex", async () => {
+      throw new Error("command failed");
+    }), /command failed/);
+    assert.equal(isVenueCommandExecuting("popdex"), false);
+  } finally {
+    release();
+    await running;
+    await close(server);
+    setDashboardMeta({ dryRun: true });
+    process.chdir(cwd);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

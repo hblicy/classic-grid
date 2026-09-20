@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeFunctionData } from "viem";
+import { decodeFunctionData, parseTransaction } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { resolvePopdexStatsAddress } from "../src/officialStats.js";
 import {
@@ -223,4 +223,55 @@ test("official statistics resolve only POPDEX_MAIN_ACCOUNT", () => {
     () => resolvePopdexStatsAddress({ POPDEX_MAIN_ACCOUNT: "bad" }),
     /地址无效/
   );
+});
+
+test("real Agent wallet preserves RPC rejection details instead of truncating them behind calldata", async (t) => {
+  const methods: string[] = [];
+  const logs: string[] = [];
+  t.mock.method(console, "error", (message: string) => { logs.push(message); });
+  const executor = new PopdexExecutor(false, {
+    env: { POPDEX_MAIN_ACCOUNT: MAIN, POPDEX_AGENT_PRIVATE_KEY: AGENT_KEY },
+    apiGet: async <T,>(pathname: string): Promise<T> => {
+      if (pathname.startsWith("/api/v1/config/symbol")) {
+        return { symbolId: 20000, tickSize: 1, lotSize: 0.0001, minQty: 0.0001, minNotional: 10 } as T;
+      }
+      return [{ symbol: "BTCUSDT", bid1Price: "99", ask1Price: "101" }] as T;
+    },
+    agentRpc: {
+      async verifyChain() {},
+      async getAgentInfo() {
+        return {
+          exists: true, expiresAt: String(Date.now() + 86_400_000), isExpired: false,
+          delegator: MAIN, name: `0x${"00".repeat(32)}` as const, isGlobal: false,
+        };
+      },
+    },
+    rpcRequest: async (method, params) => {
+      methods.push(method);
+      if (method === "eth_chainId") return "0x888";
+      if (method === "eth_sendRawTransaction") {
+        const tx = parseTransaction(params![0] as `0x${string}`);
+        assert.equal(tx.type, "legacy");
+        assert.equal(tx.chainId, 2184);
+        assert.equal(tx.gasPrice ?? 0n, 0n);
+        throw new Error(`rpc eth_sendRawTransaction: ${JSON.stringify({
+          code: -32000, message: "Agent order rejected: diagnostic test reason", data: AGENT_KEY,
+        })}`);
+      }
+      throw new Error(`rpc ${method}: method not supported`);
+    },
+  });
+  await executor.connect();
+  const result = await executor.apply([
+    { type: "place", order: { market: "BTC", side: "buy", price: 90, size: 0.2, level: 1 } },
+  ]);
+  assert.ok(methods.includes("eth_sendRawTransaction"));
+  assert.equal(result.failed, 1);
+  assert.match(result.errors[0], /eth_sendRawTransaction/);
+  assert.match(result.errors[0], /Agent order rejected: diagnostic test reason/);
+  assert.doesNotMatch(result.errors[0], /Request Arguments|Raw Transaction/);
+  assert.ok(!result.errors[0].includes(AGENT_KEY));
+  assert.ok(logs.some((line) => line.includes("Agent order rejected: diagnostic test reason")));
+  assert.ok(logs.some((line) => line.includes("[redacted hex]")));
+  assert.ok(logs.every((line) => !line.includes(AGENT_KEY)));
 });

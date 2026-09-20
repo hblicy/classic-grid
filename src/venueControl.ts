@@ -44,6 +44,7 @@ type ControlFile = {
 const CONTROL_FILE = () => path.resolve(process.cwd(), "data", "venue-control.json");
 
 let state: ControlFile = { venues: {}, pending: [] };
+const executingVenues = new Set<VenueId>();
 
 function persist(): void {
   try {
@@ -119,6 +120,37 @@ export function enqueueVenueCommand(
   }
   persist();
   return cmd;
+}
+
+/** 仅在无交易批次执行的重连边界调用；保留队列，连接恢复后仍按原 FIFO 执行。 */
+export function syncVenuePauseBeforeReconnect(venue: VenueId): void {
+  const current = getVenueControl(venue);
+  let paused = current.paused;
+  let holdSide = current.holdSide;
+  for (const cmd of state.pending) {
+    if (cmd.venue !== venue || cmd.done) continue;
+    if (cmd.action === "pause") paused = true;
+    if (cmd.action === "resume") {
+      paused = false;
+      holdSide = "neutral";
+    }
+  }
+  if (paused === current.paused && holdSide === current.holdSide) return;
+  setVenueControl(venue, { paused, holdSide });
+  console.log(`[${venue}] venue-control reconnect paused=${paused} holdSide=${holdSide}`);
+}
+
+export async function withVenueCommandExecution<T>(venue: VenueId, run: () => Promise<T>): Promise<T> {
+  executingVenues.add(venue);
+  try {
+    return await run();
+  } finally {
+    executingVenues.delete(venue);
+  }
+}
+
+export function isVenueCommandExecuting(venue: VenueId): boolean {
+  return executingVenues.has(venue);
 }
 
 /** 取出某所待执行命令（FIFO） */
