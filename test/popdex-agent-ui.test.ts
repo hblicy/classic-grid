@@ -30,7 +30,9 @@ async function loadAgentPage(
   options: {
     status?: Record<string, unknown>;
     confirmations?: boolean[];
-    waitForTransaction?: () => Promise<{ status: number }>;
+    waitForTransaction?: () => Promise<{ status: number | null } | null>;
+    getTransactionReceipt?: (hash: string) => Promise<{ status: number | null } | null>;
+    getNetwork?: () => Promise<{ chainId: bigint }>;
     verifyError?: Error;
     saveAgent?: () => Promise<unknown>;
     sendError?: Error;
@@ -126,6 +128,12 @@ async function loadAgentPage(
       Wallet: { createRandom: () => wallets[walletCount++] },
       getAddress: (value: string) => value,
       BrowserProvider: class {
+        async getNetwork() {
+          return options.getNetwork ? options.getNetwork() : { chainId: 2184n };
+        }
+        async getTransactionReceipt(hash: string) {
+          return options.getTransactionReceipt ? options.getTransactionReceipt(hash) : { status: 1 };
+        }
         async waitForTransaction() {
           return options.waitForTransaction
             ? options.waitForTransaction()
@@ -155,7 +163,7 @@ async function loadAgentPage(
             transactionCount += 1;
             configuredStatus = { ...configuredStatus, exists: false, authorized: false };
             options.onTransactionSubmitted?.();
-            return "0xtx";
+            return `0xtx${transactionCount}`;
           }
           return null;
         },
@@ -304,6 +312,193 @@ test("submitted authorization waiting for a receipt keeps the draft non-discarda
   assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
   receipt.resolve({ status: 1 });
   await authorizing;
+});
+
+test("reverted authorization preserves the draft and allows authorizing it again", async () => {
+  let attempts = 0;
+  const page = await loadAgentPage({
+    waitForTransaction: async () => ({ status: attempts++ === 0 ? 0 : 1 }),
+  });
+  await page.click("popdex-agent-generate");
+  const privateKey = page.elements.get("popdex-agent-private")?.textContent;
+  const address = page.elements.get("popdex-agent-address")?.textContent;
+  await page.click("popdex-agent-authorize");
+
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-generate")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-copy")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, privateKey);
+  assert.equal(page.elements.get("popdex-agent-address")?.textContent, address);
+  assert.equal(page.elements.get("popdex-agent-main")?.textContent, "—");
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /回滚/);
+  assert.ok(!page.requests.includes("POST /api/popdex/agent/verify"));
+  await page.click("popdex-agent-save");
+  assert.ok(!page.requests.includes("POST /api/popdex/agent/save"));
+
+  await page.click("popdex-agent-authorize");
+  assert.equal(page.transactionCount(), 2);
+  assert.equal(page.walletCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, false);
+  await page.click("popdex-agent-save");
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent,
+    "私钥已保存；请重启进程后生效");
+});
+
+for (const outcome of ["missing receipt", "unknown status", "RPC timeout"]) {
+  test(`${outcome} keeps submitted authorization locked against resending`, async () => {
+    const page = await loadAgentPage({
+      waitForTransaction: async () => {
+        if (outcome === "RPC timeout") throw new Error("RPC timeout");
+        return outcome === "missing receipt" ? null : { status: null };
+      },
+    });
+    await page.click("popdex-agent-generate");
+    await page.click("popdex-agent-authorize");
+    assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+    assert.equal(page.elements.get("popdex-agent-generate")?.disabled, true);
+    assert.equal(page.elements.get("popdex-agent-save")?.disabled, false);
+    await page.click("popdex-agent-authorize");
+    assert.equal(page.transactionCount(), 1);
+    assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey1");
+  });
+}
+
+test("submitted draft account stays visible after verification failure and refresh", async () => {
+  const page = await loadAgentPage({
+    status: {
+      configured: true,
+      exists: true,
+      authorized: true,
+      mainAccount: "0x5000000000000000000000000000000000000005",
+      agentAddress: "0x2000000000000000000000000000000000000002",
+    },
+    verifyError: new Error("verify failed"),
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  assert.equal(page.elements.get("popdex-agent-main")?.textContent,
+    "0x1000000000000000000000000000000000000001");
+  await page.click("popdex-agent-refresh");
+  assert.equal(page.elements.get("popdex-agent-main")?.textContent,
+    "0x1000000000000000000000000000000000000001");
+});
+
+test("refresh recovers a late revert and tracks only the retried authorization", async () => {
+  const queriedHashes: string[] = [];
+  let receiptStatus = 0;
+  const page = await loadAgentPage({
+    waitForTransaction: async () => { throw new Error("RPC timeout"); },
+    getTransactionReceipt: async (hash) => {
+      queriedHashes.push(hash);
+      return { status: receiptStatus };
+    },
+  });
+  await page.click("popdex-agent-generate");
+  const address = page.elements.get("popdex-agent-address")?.textContent;
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-refresh");
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-generate")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-copy")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey1");
+  assert.equal(page.elements.get("popdex-agent-address")?.textContent, address);
+  assert.equal(page.elements.get("popdex-agent-main")?.textContent, "—");
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /回滚.*重新授权/);
+  assert.deepEqual(queriedHashes, ["0xtx1"]);
+  await page.click("popdex-agent-refresh");
+  assert.deepEqual(queriedHashes, ["0xtx1"]);
+  await page.click("popdex-agent-save");
+  assert.ok(!page.requests.includes("POST /api/popdex/agent/save"));
+
+  receiptStatus = 1;
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-refresh");
+  assert.deepEqual(queriedHashes, ["0xtx1", "0xtx2"]);
+  assert.equal(page.transactionCount(), 2);
+  assert.equal(page.walletCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+  await page.click("popdex-agent-save");
+  await page.click("popdex-agent-refresh");
+  assert.deepEqual(queriedHashes, ["0xtx1", "0xtx2"]);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent,
+    "私钥已保存；请重启进程后生效");
+});
+
+for (const outcome of ["pending", "unknown status", "successful receipt", "RPC failure"]) {
+  test(`refresh after timeout preserves the draft lock on ${outcome}`, async () => {
+    const queriedHashes: string[] = [];
+    const page = await loadAgentPage({
+      waitForTransaction: async () => { throw new Error("RPC timeout"); },
+      getTransactionReceipt: async (hash) => {
+        queriedHashes.push(hash);
+        if (outcome === "RPC failure") throw new Error("receipt RPC unavailable");
+        if (outcome === "pending") return null;
+        return { status: outcome === "unknown status" ? null : 1 };
+      },
+    });
+    await page.click("popdex-agent-generate");
+    await page.click("popdex-agent-authorize");
+    await page.click("popdex-agent-refresh");
+    assert.deepEqual(queriedHashes, ["0xtx1"]);
+    assert.equal(page.elements.get("popdex-agent-generate")?.disabled, true);
+    assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+    assert.equal(page.elements.get("popdex-agent-save")?.disabled, false);
+    assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey1");
+    if (outcome === "RPC failure") {
+      assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /receipt RPC unavailable/);
+    }
+    await page.click("popdex-agent-authorize");
+    assert.equal(page.transactionCount(), 1);
+  });
+}
+
+test("receipt refresh rejects the wrong wallet network and recovers after switching back", async () => {
+  let chainId = 1n;
+  let receiptCalls = 0;
+  const page = await loadAgentPage({
+    waitForTransaction: async () => { throw new Error("RPC timeout"); },
+    getNetwork: async () => ({ chainId }),
+    getTransactionReceipt: async () => { receiptCalls++; return { status: 0 }; },
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-refresh");
+  assert.equal(receiptCalls, 0);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "", /网络/);
+  chainId = 2184n;
+  await page.click("popdex-agent-refresh");
+  assert.equal(receiptCalls, 1);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, false);
+});
+
+test("failed save preserves submitted draft for retry without another transaction", async () => {
+  let saveAttempts = 0;
+  const page = await loadAgentPage({
+    verifyError: new Error("verify failed"),
+    saveAgent: async () => {
+      if (saveAttempts++ === 0) return { error: "chain verification unavailable" };
+      return { saved: true };
+    },
+  });
+  await page.click("popdex-agent-generate");
+  await page.click("popdex-agent-authorize");
+  await page.click("popdex-agent-save");
+  assert.match(page.elements.get("popdex-agent-status")?.textContent ?? "",
+    /chain verification unavailable/);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent, "0xkey1");
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, false);
+  assert.equal(page.elements.get("popdex-agent-authorize")?.disabled, true);
+  assert.equal(page.elements.get("popdex-agent-generate")?.disabled, true);
+
+  await page.click("popdex-agent-save");
+  assert.equal(saveAttempts, 2);
+  assert.equal(page.transactionCount(), 1);
+  assert.equal(page.elements.get("popdex-agent-private")?.textContent,
+    "私钥已保存；请重启进程后生效");
+  assert.equal(page.elements.get("popdex-agent-save")?.disabled, true);
 });
 
 test("wallet rejection before submission still allows replacing the draft", async () => {

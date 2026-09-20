@@ -3,11 +3,14 @@
 
   const POPDEX_CHAIN_ID = "0x888";
   const RECEIPT_TIMEOUT_MS = 120000;
+  class RevertedTransactionError extends Error {}
+
   let generatedPrivateKey = null;
   let generatedAgentAddress = null;
   let connectedMainAccount = null;
   let authorizationSubmitted = false;
   let authorizationVerified = false;
+  let authorizationTransactionHash = null;
   let configuredStatus = null;
   let operationInProgress = false;
 
@@ -90,6 +93,7 @@
   function renderStatus(status) {
     configuredStatus = status;
     byId("popdex-agent-main").textContent =
+      (generatedAgentAddress && connectedMainAccount) ||
       status.mainAccount || connectedMainAccount || "—";
     if (!generatedAgentAddress) {
       byId("popdex-agent-address").textContent = status.agentAddress || "—";
@@ -112,12 +116,36 @@
   async function refresh() {
     setStatus("正在读取链上状态…");
     try {
+      let revertedHash = null;
+      if (authorizationSubmitted && !authorizationVerified && authorizationTransactionHash) {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const network = await provider.getNetwork();
+        if (network.chainId !== BigInt(POPDEX_CHAIN_ID)) {
+          throw new Error("请将钱包切回 PopDEX 网络后刷新授权交易状态。");
+        }
+        const receipt = await provider.getTransactionReceipt(authorizationTransactionHash);
+        if (receipt && receipt.status === 0) {
+          revertedHash = authorizationTransactionHash;
+          unlockRevertedAuthorization();
+        }
+      }
       renderStatus(await getAgentStatus());
+      if (revertedHash) {
+        setStatus(`链上交易 ${revertedHash} 已回滚。Agent 私钥已保留，可重新授权。`, "down");
+      }
       return configuredStatus;
     } catch (error) {
       setStatus(`读取失败：${errorMessage(error)}`, "down");
       throw error;
     }
+  }
+
+  function unlockRevertedAuthorization() {
+    authorizationSubmitted = false;
+    authorizationVerified = false;
+    authorizationTransactionHash = null;
+    connectedMainAccount = null;
+    byId("popdex-agent-main").textContent = configuredStatus?.mainAccount || "—";
   }
 
   function generateAgent() {
@@ -135,6 +163,7 @@
     connectedMainAccount = null;
     authorizationSubmitted = false;
     authorizationVerified = false;
+    authorizationTransactionHash = null;
     byId("popdex-agent-address").textContent = generatedAgentAddress;
     byId("popdex-agent-private").textContent = generatedPrivateKey;
     setStatus("新 Agent 只存在于本页内存，请先备份私钥再授权。", "down");
@@ -188,6 +217,9 @@
     if (onSubmitted) onSubmitted(transactionHash);
     const provider = new ethers.BrowserProvider(window.ethereum);
     const receipt = await provider.waitForTransaction(transactionHash, 1, RECEIPT_TIMEOUT_MS);
+    if (receipt && receipt.status === 0) {
+      throw new RevertedTransactionError(`PopDEX Agent 链上交易已回滚：${transactionHash}`);
+    }
     if (!receipt || Number(receipt.status) !== 1) {
       throw new Error(`PopDEX Agent 链上交易未成功确认：${transactionHash}`);
     }
@@ -229,8 +261,10 @@
     try {
       transactionHash = await sendAndConfirm(checked.transaction, (submittedHash) => {
         transactionHash = submittedHash;
+        authorizationTransactionHash = submittedHash;
         connectedMainAccount = mainAccount;
         authorizationSubmitted = true;
+        byId("popdex-agent-main").textContent = mainAccount;
       });
       await verifyApproval({ mainAccount, agentAddress: generatedAgentAddress });
       connectedMainAccount = mainAccount;
@@ -238,9 +272,13 @@
       byId("popdex-agent-main").textContent = mainAccount;
       setStatus(`链上授权已确认（${transactionHash}），请保存 Agent 私钥。`, "up");
     } catch (error) {
+      if (error instanceof RevertedTransactionError) {
+        unlockRevertedAuthorization();
+        throw new Error(`${errorMessage(error)}。Agent 私钥已保留，可重新授权。`);
+      }
       if (transactionHash) {
         throw new Error(
-          `链上交易 ${transactionHash} 已提交，但授权确认或回验失败：${errorMessage(error)}。请保留私钥，不要重复授权。`
+          `链上交易 ${transactionHash} 已提交，但授权确认或回验失败：${errorMessage(error)}。请保留私钥，不要重复授权；可点击“刷新链上状态”重新查询回执。`
         );
       }
       throw error;
@@ -266,6 +304,7 @@
     generatedAgentAddress = null;
     authorizationSubmitted = false;
     authorizationVerified = false;
+    authorizationTransactionHash = null;
     byId("popdex-agent-private").textContent = "私钥已保存；请重启进程后生效";
     await refresh();
   }
@@ -295,6 +334,7 @@
     connectedMainAccount = null;
     authorizationSubmitted = false;
     authorizationVerified = false;
+    authorizationTransactionHash = null;
     byId("popdex-agent-private").textContent = message;
   }
 

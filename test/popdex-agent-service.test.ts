@@ -332,6 +332,57 @@ test("mutation guard blocks save, revoke preparation and clear", async () => {
   assert.deepEqual(ctx.calls, []);
 });
 
+for (const operation of ["save", "clear"] as const) {
+  test(`${operation} refuses to write if trading resumes during RPC and can retry after pausing`, async () => {
+    const lookupStarted = deferred<void>();
+    const releaseLookup = deferred<void>();
+    let paused = true;
+    const fsImpl = new MemoryFs();
+    fsImpl.content = `EXISTING=value\nPOPDEX_MAIN_ACCOUNT=${MAIN}\nPOPDEX_AGENT_PRIVATE_KEY=${AGENT_KEY}\n`;
+    const originalContent = fsImpl.content;
+    const ctx = service({
+      fsImpl,
+      processEnv: configuredEnv(),
+      canMutate: () => paused,
+      getAgentInfo: async () => {
+        lookupStarted.resolve();
+        await releaseLookup.promise;
+        return operation === "save"
+          ? activeInfo({ delegator: OTHER_MAIN })
+          : activeInfo({ exists: false, delegator: null, expiresAt: "0" });
+      },
+    });
+    const originalEnv = { ...ctx.processEnv };
+    const mutate = () => operation === "save"
+      ? ctx.service.save({ mainAccount: OTHER_MAIN, agentPrivateKey: NEW_AGENT_KEY })
+      : ctx.service.clear();
+
+    const pending = mutate();
+    await lookupStarted.promise;
+    paused = false;
+    releaseLookup.resolve();
+
+    await assert.rejects(pending, /请先暂停/);
+    assert.equal(fsImpl.writes.length, 0);
+    assert.equal(fsImpl.files.size, 0);
+    assert.equal(fsImpl.content, originalContent);
+    assert.deepEqual(ctx.processEnv, originalEnv);
+
+    paused = true;
+    await mutate();
+    assert.equal(fsImpl.writes.length, 1);
+    if (operation === "save") {
+      assert.equal(ctx.processEnv.POPDEX_MAIN_ACCOUNT, OTHER_MAIN);
+      assert.equal(ctx.processEnv.POPDEX_AGENT_PRIVATE_KEY, NEW_AGENT_KEY);
+      assert.match(fsImpl.content, new RegExp(`^POPDEX_AGENT_PRIVATE_KEY=${NEW_AGENT_KEY}$`, "m"));
+    } else {
+      assert.equal(ctx.processEnv.POPDEX_MAIN_ACCOUNT, MAIN);
+      assert.equal(ctx.processEnv.POPDEX_AGENT_PRIVATE_KEY, undefined);
+      assert.match(fsImpl.content, /^# POPDEX_AGENT_PRIVATE_KEY=$/m);
+    }
+  });
+}
+
 test("revoke allows expired and global Agents owned by the main account", async () => {
   for (const info of [activeInfo({ isExpired: true }), activeInfo({ isGlobal: true })]) {
     const ctx = service({ info });

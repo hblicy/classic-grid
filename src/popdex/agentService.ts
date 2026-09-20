@@ -259,6 +259,7 @@ export class PopdexAgentService {
   }
 
   private writeSettings(values: Record<string, string>): void {
+    this.assertMutationAllowed();
     let content = this.fsImpl.existsSync(this.envFile)
       ? String(this.fsImpl.readFileSync(this.envFile, "utf8"))
       : "";
