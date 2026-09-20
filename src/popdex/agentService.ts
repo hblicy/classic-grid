@@ -83,6 +83,7 @@ export class PopdexAgentService {
   private readonly platform: NodeJS.Platform;
   private readonly now: () => number;
   private readonly canMutate: () => boolean;
+  private identityWriteTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
     rpcClient?: AgentRpc;
@@ -106,6 +107,20 @@ export class PopdexAgentService {
   private assertMutationAllowed(): void {
     if (!this.canMutate()) {
       throw new Error("PopDEX 正在实盘运行，请先暂停后再修改 Agent。");
+    }
+  }
+
+  private async withIdentityWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.identityWriteTail;
+    let release!: () => void;
+    this.identityWriteTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
     }
   }
 
@@ -185,15 +200,17 @@ export class PopdexAgentService {
     mainAccount: string;
     agentPrivateKey: string;
   }): Promise<PublicAgentStatus> {
-    this.assertMutationAllowed();
-    const main = strictAddress(input.mainAccount, "mainAccount");
-    const agentAddress = deriveAgentAddress(input.agentPrivateKey);
-    const status = await this.verifyAuthorization({ mainAccount: main, agentAddress });
-    this.writeSettings({
-      [MAIN_ACCOUNT_KEY]: main,
-      [AGENT_PRIVATE_KEY]: input.agentPrivateKey,
+    return this.withIdentityWrite(async () => {
+      this.assertMutationAllowed();
+      const main = strictAddress(input.mainAccount, "mainAccount");
+      const agentAddress = deriveAgentAddress(input.agentPrivateKey);
+      const status = await this.verifyAuthorization({ mainAccount: main, agentAddress });
+      this.writeSettings({
+        [MAIN_ACCOUNT_KEY]: main,
+        [AGENT_PRIVATE_KEY]: input.agentPrivateKey,
+      });
+      return status;
     });
-    return status;
   }
 
   async prepareRevoke(input: {
@@ -220,20 +237,25 @@ export class PopdexAgentService {
   }
 
   async clear(): Promise<{ configured: false; mainAccount: string | null }> {
-    this.assertMutationAllowed();
-    const rawMain = this.processEnv[MAIN_ACCOUNT_KEY] || "";
-    const privateKey = this.processEnv[AGENT_PRIVATE_KEY] || "";
-    const main = rawMain ? strictAddress(rawMain, "mainAccount") : null;
-    if (!privateKey) return { configured: false, mainAccount: main };
-    if (!main) throw new Error("PopDEX Agent 已配置私钥但缺少主账户。");
-    const agentAddress = deriveAgentAddress(privateKey);
-    await this.rpcClient.verifyChain();
-    const info = await this.rpcClient.getAgentInfo(agentAddress);
-    if (info.exists) {
-      throw new Error("PopDEX Agent 链上撤销尚未确认，拒绝清除本地私钥。");
-    }
-    this.writeSettings({ [AGENT_PRIVATE_KEY]: "" });
-    return { configured: false, mainAccount: main };
+    return this.withIdentityWrite(async () => {
+      this.assertMutationAllowed();
+      const rawMain = this.processEnv[MAIN_ACCOUNT_KEY] || "";
+      const privateKey = this.processEnv[AGENT_PRIVATE_KEY] || "";
+      const main = rawMain ? strictAddress(rawMain, "mainAccount") : null;
+      if (!privateKey) return { configured: false, mainAccount: main };
+      if (!main) throw new Error("PopDEX Agent 已配置私钥但缺少主账户。");
+      const agentAddress = deriveAgentAddress(privateKey);
+      await this.rpcClient.verifyChain();
+      const info = await this.rpcClient.getAgentInfo(agentAddress);
+      if (info.exists) {
+        throw new Error("PopDEX Agent 链上撤销尚未确认，拒绝清除本地私钥。");
+      }
+      if ((this.processEnv[AGENT_PRIVATE_KEY] || "") !== privateKey) {
+        throw new Error("PopDEX Agent 配置已变化，拒绝清除当前私钥。");
+      }
+      this.writeSettings({ [AGENT_PRIVATE_KEY]: "" });
+      return { configured: false, mainAccount: main };
+    });
   }
 
   private writeSettings(values: Record<string, string>): void {

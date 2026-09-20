@@ -9,7 +9,19 @@ const MAIN = "0x1000000000000000000000000000000000000001";
 const OTHER_MAIN = "0x2000000000000000000000000000000000000002";
 const AGENT_KEY = `0x${"11".repeat(32)}`;
 const AGENT = deriveAgentAddress(AGENT_KEY);
+const NEW_AGENT_KEY = `0x${"22".repeat(32)}`;
+const NEW_AGENT = deriveAgentAddress(NEW_AGENT_KEY);
 const NAME = agentNameBytes32("grid.example");
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 class MemoryFs {
   content = "EXISTING=value\n";
@@ -68,6 +80,7 @@ function service(options: {
   processEnv?: NodeJS.ProcessEnv;
   canMutate?: () => boolean;
   fsImpl?: MemoryFs;
+  getAgentInfo?: (agent: string) => AgentInfo | Promise<AgentInfo>;
 } = {}) {
   const fsImpl = options.fsImpl ?? new MemoryFs();
   const processEnv = options.processEnv ?? {};
@@ -79,7 +92,7 @@ function service(options: {
     },
     async getAgentInfo(agent: string) {
       calls.push(`info:${agent}`);
-      return info;
+      return options.getAgentInfo ? options.getAgentInfo(agent) : info;
     },
     async getAgents(main: string) {
       calls.push(`agents:${main}`);
@@ -161,6 +174,100 @@ test("clear removes every duplicate Agent key from the env file", async () => {
     1
   );
   assert.doesNotMatch(fsImpl.content, /^POPDEX_AGENT_PRIVATE_KEY=/m);
+});
+
+test("concurrent clear cannot remove a newly saved Agent key", async () => {
+  const oldLookupStarted = deferred<void>();
+  const releaseOldLookup = deferred<void>();
+  const ctx = service({
+    processEnv: configuredEnv(),
+    getAgentInfo: async (agent) => {
+      if (agent === AGENT) {
+        oldLookupStarted.resolve();
+        await releaseOldLookup.promise;
+        return activeInfo({ exists: false, delegator: null, expiresAt: "0" });
+      }
+      assert.equal(agent, NEW_AGENT);
+      return activeInfo();
+    },
+  });
+
+  const clearing = ctx.service.clear();
+  await oldLookupStarted.promise;
+  let saveSettled = false;
+  const saving = ctx.service
+    .save({ mainAccount: MAIN, agentPrivateKey: NEW_AGENT_KEY })
+    .then(() => {
+      saveSettled = true;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  const saveSettledBeforeRelease = saveSettled;
+
+  releaseOldLookup.resolve();
+  await Promise.all([clearing, saving]);
+  assert.equal(saveSettledBeforeRelease, false);
+  assert.equal(ctx.processEnv.POPDEX_AGENT_PRIVATE_KEY, NEW_AGENT_KEY);
+  assert.match(
+    ctx.fsImpl.content,
+    new RegExp(`^POPDEX_AGENT_PRIVATE_KEY=${NEW_AGENT_KEY}$`, "m")
+  );
+});
+
+test("clear refuses to erase an Agent key changed during revocation verification", async () => {
+  const lookupStarted = deferred<void>();
+  const releaseLookup = deferred<void>();
+  const processEnv = configuredEnv();
+  const ctx = service({
+    processEnv,
+    getAgentInfo: async () => {
+      lookupStarted.resolve();
+      await releaseLookup.promise;
+      return activeInfo({ exists: false, delegator: null, expiresAt: "0" });
+    },
+  });
+
+  const clearing = ctx.service.clear();
+  await lookupStarted.promise;
+  processEnv.POPDEX_AGENT_PRIVATE_KEY = NEW_AGENT_KEY;
+  releaseLookup.resolve();
+
+  await assert.rejects(clearing, /配置已变化.*拒绝清除/);
+  assert.equal(processEnv.POPDEX_AGENT_PRIVATE_KEY, NEW_AGENT_KEY);
+  assert.equal(ctx.fsImpl.writes.length, 0);
+});
+
+test("failed identity write releases the queue for the next save", async () => {
+  const firstLookupStarted = deferred<void>();
+  const releaseFirstLookup = deferred<void>();
+  let attempts = 0;
+  let secondLookupStarted = false;
+  const ctx = service({
+    getAgentInfo: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        firstLookupStarted.resolve();
+        await releaseFirstLookup.promise;
+        throw new Error("rpc unavailable");
+      }
+      secondLookupStarted = true;
+      return activeInfo();
+    },
+  });
+
+  const first = ctx.service.save({ mainAccount: MAIN, agentPrivateKey: AGENT_KEY });
+  await firstLookupStarted.promise;
+  const second = ctx.service.save({
+    mainAccount: MAIN,
+    agentPrivateKey: NEW_AGENT_KEY,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondLookupStartedBeforeRelease = secondLookupStarted;
+
+  releaseFirstLookup.resolve();
+  await assert.rejects(first, /rpc unavailable/);
+  await second;
+  assert.equal(secondLookupStartedBeforeRelease, false);
+  assert.equal(ctx.processEnv.POPDEX_AGENT_PRIVATE_KEY, NEW_AGENT_KEY);
 });
 
 test("status returns public identity without the configured private key", async () => {
